@@ -60,7 +60,7 @@ except Exception as e:
 # =========================
 # LEITURA DA PLANILHA
 # =========================
-arquivo_excel = './abertos/abertos_maio26.xlsx'
+arquivo_excel = './abertos/pintassilgo.xlsx'
 excel_file     = pd.ExcelFile(arquivo_excel)
 nome_planilha  = excel_file.sheet_names[0]
 df             = pd.read_excel(arquivo_excel, sheet_name=nome_planilha)
@@ -84,11 +84,11 @@ def _proximo_resultado_file():
 # CHROME + HELPERS
 # =========================
 def criar_driver():
-    options = webdriver.ChromeOptions()
+    options = webdriver.EdgeOptions()
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    d = webdriver.Chrome(options=options)
+    d = webdriver.Edge(options=options)
     d.maximize_window()
     return d
 
@@ -434,6 +434,7 @@ for k, v in mapa_corretores.items():
 def _salvar_excel_resultado():
     if not resultados_email:
         return
+    os.makedirs('resultados', exist_ok=True)
     arquivo = _proximo_resultado_file()
     df_todos    = pd.DataFrame(resultados_email)
     df_com_fone = df_todos[df_todos['Telefone'] != ''].reset_index(drop=True)
