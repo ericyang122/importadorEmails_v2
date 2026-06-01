@@ -60,16 +60,30 @@ except Exception as e:
 # =========================
 # LEITURA DA PLANILHA
 # =========================
-arquivo_excel = './abertos/pintassilgo.xlsx'
+arquivo_excel = './abertos/abertos_cora.xlsx'
 excel_file     = pd.ExcelFile(arquivo_excel)
 nome_planilha  = excel_file.sheet_names[0]
 df             = pd.read_excel(arquivo_excel, sheet_name=nome_planilha)
+print(f"Arquivo carregado: {arquivo_excel} | Aba: '{nome_planilha}' | {len(df)} linhas")
 
 df = df.rename(columns={
+    # formato antigo
     'CORRETOR ORIGEM': 'CORRETOR DE ORIGEM',
     'TELEFONE'       : 'FONE2',
-    'NOME COMPLETO'  : 'NOME'
+    'NOME COMPLETO'  : 'NOME',
+    # formato Base Cora
+    'nome_cliente'   : 'NOME',
+    'celular'        : 'FONE2',
+    'corretor'       : 'CORRETOR DE ORIGEM',
+    'origem'         : 'TIPO PLANTAO',
+    'gerente'        : 'GERENTE',
 })
+
+# celular vem como float (ex: 1.199622e+10) → converte para string de dígitos
+if 'FONE2' in df.columns:
+    df['FONE2'] = df['FONE2'].apply(
+        lambda x: str(int(x)) if pd.notna(x) and str(x).strip() not in ('', 'nan') else ''
+    )
 
 _nome_excel    = os.path.splitext(os.path.basename(arquivo_excel.lstrip('./')))[0]
 PROGRESSO_FILE = f'progresso_{_nome_excel}.json'
@@ -345,6 +359,11 @@ midia_mapeamentos_brutos = [
     ("WHATSAPP", 26),
     ("YOUTUBE", 27),
     ("ZAP", 28),
+    # Base Cora
+    ("VISITA DIRETA AO STANDE", 21),
+    ("SITE FORMULARIO", 21),
+    ("TELEFONE", 16),
+    ("CORA PINHEIROS", 16),
 ]
 
 midia_por_tipo_plantao = {}
@@ -357,6 +376,7 @@ canal_plantao_tipos = {
     normalizar_texto("VISITACAO"),
     normalizar_texto("VISITAÇÃO"),
     normalizar_texto("RETORNO"),
+    normalizar_texto("VISITA DIRETA AO STANDE"),
 }
 
 canal_carteira_tipos = {                                        
@@ -476,7 +496,11 @@ try:
         tipo_plantao_norm = normalizar_texto(tipo_plantao_raw)
         posicao_midia = midia_por_tipo_plantao.get(tipo_plantao_norm, 16)  # default: Outros
 
-        if corretor_original_norm in mapa_corretores:
+        gerente_planilha = str(row.get('GERENTE') or '').strip()
+        if gerente_planilha:
+            gerente  = gerente_planilha
+            corretor = corretor_original_raw.strip() or "Corretor Inativo"
+        elif corretor_original_norm in mapa_corretores:
             gerente  = mapa_corretores[corretor_original_norm]
             corretor = corretor_original_raw.strip()
         elif corretor_original_norm in mapa_corretores_base:
