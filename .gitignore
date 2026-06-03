@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 progresso_*.json
+uploads/
+flask*.log
+abertos/*.xlsx
+resultados/*.xlsx

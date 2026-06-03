@@ -23,7 +23,7 @@ automa-o_abyara/
 Requer Python 3.9+ e Google Chrome instalado.
 
 ```bash
-pip install selenium pandas requests openpyxl python-dotenv
+pip install -r requirements.txt
 ```
 
 O ChromeDriver é gerenciado automaticamente pelo Selenium 4+.
@@ -90,3 +90,57 @@ O script vai:
 | `.env` | **Criar manualmente** — não está no repositório |
 | `abertos/` | Sim (com o Excel) |
 | `resultados/` | Criar vazia no destino |
+
+---
+
+## Interface local Flask
+
+Para rodar a tela local:
+
+```bash
+python app.py
+```
+
+Acesse:
+
+```text
+http://127.0.0.1:5000
+```
+
+Senha local padrao da ferramenta:
+
+```text
+marketing123
+```
+
+Antes de publicar para outras pessoas, defina uma senha propria no `.env`:
+
+```env
+APP_PASSWORD=uma_senha_forte
+APP_SECRET_KEY=uma_chave_grande_aleatoria
+```
+
+`APP_PASSWORD` e a senha da tela do importador. Ela protege o acesso antes de aparecer o formulario do Sigavi.
+`APP_SECRET_KEY` e uma chave interna do Flask para assinar a sessao do navegador; use um texto grande e aleatorio e nao compartilhe.
+
+Na tela, o usuario informa login/senha do Sigavi e envia a planilha `.xlsx`.
+Essas credenciais nao sao gravadas em `.env`; elas sao passadas apenas para a execucao do `confio.py`.
+A planilha enviada e apagada quando a execucao termina. A planilha de resultado fica disponivel para download e e apagada apos baixar ou ao iniciar outra execucao.
+
+O script tambem aceita planilha por parametro:
+
+```bash
+python confio.py --excel ./abertos/abertos_cora.xlsx
+```
+
+Para rodar o navegador em modo oculto:
+
+```bash
+python confio.py --excel ./abertos/abertos_cora.xlsx --headless
+```
+
+Para escolher a pasta de resultado:
+
+```bash
+python confio.py --excel ./abertos/abertos_cora.xlsx --result-dir ./resultados
+```

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Importador Sigavi</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  {% if not authenticated %}
+  <main class="login-page">
+    <form class="login-box" method="post" action="{{ url_for('login') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div>
+        <p class="eyebrow">Acesso interno</p>
+        <h1>Importador Sigavi</h1>
+      </div>
+
+      {% if login_error %}
+      <p class="error-message">{{ login_error }}</p>
+      {% endif %}
+
+      <label>
+        Senha da ferramenta
+        <input type="password" name="password" autocomplete="current-password" required autofocus>
+      </label>
+
+      <button type="submit">Entrar</button>
+    </form>
+  </main>
+  {% else %}
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Marketing</p>
+        <h1>Importador Sigavi</h1>
+      </div>
+      <form method="post" action="{{ url_for('logout') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="ghost-button" type="submit">Sair</button>
+      </form>
+    </header>
+
+    <section class="workspace">
+      <form id="run-form" class="panel" enctype="multipart/form-data">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <div class="panel-header">
+          <h2>Nova importação</h2>
+          <span id="status-badge" class="status-badge idle">Pronto</span>
+        </div>
+
+        <label>
+          Login Sigavi
+          <input type="email" name="sigavi_login" autocomplete="username" required>
+        </label>
+
+        <label>
+          Senha Sigavi
+          <input type="password" name="sigavi_senha" autocomplete="current-password" required>
+        </label>
+
+        <label>
+          Planilha Excel
+          <input type="file" name="planilha" accept=".xlsx" required>
+        </label>
+
+        <label class="checkbox-row">
+          <input type="checkbox" name="headless" checked>
+          Rodar navegador oculto
+        </label>
+
+        <button id="submit-button" type="submit">Executar automação</button>
+      </form>
+
+      <section class="panel log-panel">
+        <div class="panel-header">
+          <h2>Status</h2>
+          <span id="job-id">Sem execução</span>
+        </div>
+        <pre id="log-output">Aguardando planilha.</pre>
+        <div id="download-card" class="download-card hidden">
+          <div>
+            <strong>Resultado pronto</strong>
+            <span id="download-filename">resultado.xlsx</span>
+          </div>
+          <a id="download-link" class="download-button" href="#">Baixar planilha</a>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  {% endif %}
+</body>
+</html>

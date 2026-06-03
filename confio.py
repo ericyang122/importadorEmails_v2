@@ -1,3 +1,4 @@
+import argparse
 import re
 import time
 import json
@@ -7,9 +8,36 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Importa leads de uma planilha para o Sigavi.")
+    parser.add_argument(
+        "--excel",
+        default=os.getenv("SIGAVI_EXCEL", "./abertos/abertos_cora.xlsx"),
+        help="Caminho da planilha Excel a importar.",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Executa o navegador sem janela visivel.",
+    )
+    parser.add_argument(
+        "--result-dir",
+        default=os.getenv("SIGAVI_RESULT_DIR", "resultados"),
+        help="Pasta onde a planilha de resultado sera salva.",
+    )
+    return parser.parse_args()
+
+
+ARGS = parse_args()
 load_dotenv()
 SIGAVI_LOGIN = os.getenv("SIGAVI_LOGIN")
 SIGAVI_SENHA = os.getenv("SIGAVI_SENHA")
+HEADLESS = ARGS.headless or os.getenv("SIGAVI_HEADLESS", "").strip().lower() in {"1", "true", "yes", "sim"}
+RESULT_DIR = ARGS.result_dir
+
+if not SIGAVI_LOGIN or not SIGAVI_SENHA:
+    print("ERRO: informe SIGAVI_LOGIN e SIGAVI_SENHA no .env ou no ambiente da execucao.")
+    raise SystemExit(1)
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -60,7 +88,11 @@ except Exception as e:
 # =========================
 # LEITURA DA PLANILHA
 # =========================
-arquivo_excel = './abertos/abertos_cora.xlsx'
+arquivo_excel = ARGS.excel
+if not os.path.exists(arquivo_excel):
+    print(f"ERRO: planilha nao encontrada: {arquivo_excel}")
+    raise SystemExit(1)
+
 excel_file     = pd.ExcelFile(arquivo_excel)
 nome_planilha  = excel_file.sheet_names[0]
 df             = pd.read_excel(arquivo_excel, sheet_name=nome_planilha)
@@ -90,9 +122,9 @@ PROGRESSO_FILE = f'progresso_{_nome_excel}.json'
 
 def _proximo_resultado_file():
     i = 1
-    while os.path.exists(f'resultados/resultado_{_nome_excel}_{i}.xlsx'):
+    while os.path.exists(os.path.join(RESULT_DIR, f'resultado_{_nome_excel}_{i}.xlsx')):
         i += 1
-    return f'resultados/resultado_{_nome_excel}_{i}.xlsx'
+    return os.path.join(RESULT_DIR, f'resultado_{_nome_excel}_{i}.xlsx')
 
 # =========================
 # CHROME + HELPERS
@@ -102,8 +134,14 @@ def criar_driver():
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    if HEADLESS:
+        options.add_argument("--headless=new")
+        options.add_argument("--window-size=1920,1080")
     d = webdriver.Edge(options=options)
-    d.maximize_window()
+    if HEADLESS:
+        d.set_window_size(1920, 1080)
+    else:
+        d.maximize_window()
     return d
 
 driver = criar_driver()
@@ -454,7 +492,7 @@ for k, v in mapa_corretores.items():
 def _salvar_excel_resultado():
     if not resultados_email:
         return
-    os.makedirs('resultados', exist_ok=True)
+    os.makedirs(RESULT_DIR, exist_ok=True)
     arquivo = _proximo_resultado_file()
     df_todos    = pd.DataFrame(resultados_email)
     df_com_fone = df_todos[df_todos['Telefone'] != ''].reset_index(drop=True)
@@ -464,6 +502,7 @@ def _salvar_excel_resultado():
     total    = len(df_todos)
     com_fone = len(df_com_fone)
     print(f"\nResultados salvos em {arquivo}")
+    print(f"RESULT_FILE={arquivo}")
     print(f"Resumo: {com_fone} telefone(s) encontrado(s) de {total} email(s) buscado(s).")
 
 try:
