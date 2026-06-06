@@ -90,8 +90,17 @@ CONSULTA_WORKERS = max(1, int(os.getenv("SIGAVI_CONSULTA_WORKERS", "8")))
 CONSULTA_TENTATIVAS = max(1, int(os.getenv("SIGAVI_CONSULTA_TENTATIVAS", "3")))
 # Base (segundos) do backoff entre tentativas; cresce a cada tentativa.
 CONSULTA_BACKOFF = float(os.getenv("SIGAVI_CONSULTA_BACKOFF", "1.5"))
+# Fator de velocidade do cadastro: multiplica todas as pausas de UI do Selenium.
+# 1.0 = comportamento original. Abaixe (ex: 0.6) para acelerar; suba se a tela
+# do Sigavi estiver lenta e o cadastro comecar a falhar.
+CADASTRO_DELAY = max(0.1, float(os.getenv("SIGAVI_CADASTRO_DELAY", "1.0")))
 # Protege a renovacao de cookies/token (o driver Selenium nao e thread-safe).
 _token_lock = threading.Lock()
+
+
+def pausa_cadastro(segundos):
+    """Pausa proporcional ao CADASTRO_DELAY (permite calibrar a velocidade)."""
+    time.sleep(segundos * CADASTRO_DELAY)
 
 def carregar_progresso():
     if os.path.exists(PROGRESSO_FILE):
@@ -835,7 +844,7 @@ try:
                 if parada_solicitada():
                     raise KeyboardInterrupt
                 driver.get('https://abyara.sigavi360.com.br/CRM/Fac')
-                time.sleep(3)
+                pausa_cadastro(3)
                 try:
                     telefone_elem_busca = wait_visible(telefone_busca_locator, timeout=20)
                     break
@@ -865,7 +874,7 @@ try:
     
             # dispara busca e verifica duplicidade antes de ir para cadastro
             ActionChains(driver).send_keys(Keys.ENTER).perform()
-            time.sleep(2.5)  # aguarda carregamento da grade de resultados
+            pausa_cadastro(2.5)  # aguarda carregamento da grade de resultados
             resultado_busca_locator = (By.XPATH, '/html/body/section/section/div/div/div[2]/div/div[2]/div[2]/div[2]/div/div[4]/table/tbody/tr')
             duplicado = False
             try:
@@ -894,21 +903,21 @@ try:
     
             # navegação leve (como no seu script)
             ActionChains(driver).send_keys(Keys.ARROW_DOWN).perform()
-            time.sleep(0.5)
+            pausa_cadastro(0.5)
             ActionChains(driver).send_keys(Keys.ARROW_DOWN).perform()
-            time.sleep(0.5)
-    
+            pausa_cadastro(0.5)
+
             # Vai direto ao cadastro
             driver.get('https://abyara.sigavi360.com.br/CRM/Fac/Cadastro')
-            time.sleep(2)
-    
+            pausa_cadastro(2)
+
             # === BLOCO CADASTRO ===
             wait_visible((By.ID, 'Nome')).send_keys(nome)
-            time.sleep(2.5)
-    
+            pausa_cadastro(2.5)
+
             # Abre o bloco de telefones
             safe_click((By.XPATH, '/html/body/div[2]/form/div[2]/div/div/div[1]/div[2]/div[1]/div/div/a'))
-            time.sleep(1)
+            pausa_cadastro(1)
     
             # Seleciona "Celular" no tipo (setas + enter)
             celular_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[2]/div/div/div[1]/div[2]/div[1]/div/table/tbody/tr/td[1]/span[1]/span/span[1]')
@@ -920,11 +929,11 @@ try:
             tel_input = wait_visible(telefone_grid_input_locator)
             tel_input.click()
             tel_input.send_keys(telefone)
-            time.sleep(1)
-    
+            pausa_cadastro(1)
+
             # Adiciona telefone (ícone de +/confirmar)
             safe_click((By.XPATH, '/html/body/div[2]/form/div[2]/div/div/div[1]/div[2]/div[1]/div/table/tbody/tr/td[4]/a[1]/span'))
-            time.sleep(1)
+            pausa_cadastro(1)
     
             # Canal (SMS)
             sms_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[3]/div/div/div[1]/div[1]/div[1]/div[1]/div[1]/span[2]/span/span[1]')
@@ -933,26 +942,26 @@ try:
             for _ in range(canal_setas):
                 ac_canal.send_keys(Keys.ARROW_DOWN)
             ac_canal.send_keys(Keys.ENTER).perform()
-            time.sleep(1)
-    
+            pausa_cadastro(1)
+
             # Mídia
             midia_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[3]/div/div/div[1]/div[1]/div[1]/div[1]/div[2]/span[2]/span/span[1]')
             safe_click(midia_combo_locator)
             # seleciona conforme TIPO PLANTAO
             selecionar_midia_por_posicao(posicao_midia)
-            time.sleep(1)
-    
+            pausa_cadastro(1)
+
             # Equipe (gerente)
             equipe_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[3]/div/div/div[1]/div[1]/div[1]/div[2]/div[1]/span[1]/span/span[1]')
             safe_click(equipe_combo_locator)
             ActionChains(driver).send_keys(gerente, Keys.ENTER).perform()
-            time.sleep(0.8)
-    
+            pausa_cadastro(0.8)
+
             # Corretor
             corretor_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[3]/div/div/div[1]/div[1]/div[1]/div[2]/div[2]/div[1]/span[1]/span/span[1]')
             safe_click(corretor_combo_locator)
             ActionChains(driver).send_keys(corretor, Keys.ENTER).perform()
-            time.sleep(0.8)
+            pausa_cadastro(0.8)
     
             # Abre modal "Imóvel/Origem"
             safe_click((By.XPATH, "/html/body/div[2]/form/div[3]/div/div/div[1]/div[2]/div[2]/a/span"))
@@ -966,24 +975,24 @@ try:
             your_code = wait_visible(your_code_input_locator)
             your_code.clear()
             your_code.send_keys("lume")
-            time.sleep(0.5)
-    
+            pausa_cadastro(0.5)
+
             # Confirma modal
             safe_click((By.XPATH, "/html/body/div[2]/div[2]/div/div/div[2]/div[3]/div[2]/button"))
-            time.sleep(1)
-    
+            pausa_cadastro(1)
+
             # Botão que às vezes fica atrás de overlay
             safe_click((By.CSS_SELECTOR, "#dvImovelOrigemComando a"))
-            time.sleep(1)
-    
+            pausa_cadastro(1)
+
             # 1) Confirmação inicial do formulário
             safe_click((By.XPATH, "/html/body/div[2]/form/div[1]/div/div[1]/button[2]"))
-            time.sleep(2)
+            pausa_cadastro(2)
     
             # 2) Tenta fechar popup de duplicidade (se existir)
             try:
                 safe_click((By.XPATH, '//*[@id="popVerificaDuplicidade"]/div/div/div[3]/button'))
-                time.sleep(0.5)
+                pausa_cadastro(0.5)
                 print(f"Lead duplicado encontrado para telefone {telefone}. Pulando {nome}.")
                 resultados_cadastro.append({
                     'Linha': index + 1,
@@ -1000,7 +1009,7 @@ try:
     
             # 3) Salvar
             safe_click((By.XPATH, '//*[@id="cmdSalva"]'))
-            time.sleep(3)
+            pausa_cadastro(3)
             print(f"[CADASTRADO] {telefone}")
             resultados_cadastro.append({
                 'Linha': index + 1,
