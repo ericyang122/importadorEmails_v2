@@ -83,8 +83,9 @@ from selenium.common.exceptions import (
 
 BASE_URL = "https://abyara.sigavi360.com.br"
 # Quantas buscas por email rodam em paralelo no modo consulta.
-# 4 e um valor seguro: paraleliza sem fazer o Sigavi limitar (throttle) as respostas.
-CONSULTA_WORKERS = max(1, int(os.getenv("SIGAVI_CONSULTA_WORKERS", "4")))
+# 8 e o padrao; o retry anti-throttle recupera respostas vazias, entao nao
+# perde telefone mesmo se o Sigavi limitar. Baixe via .env se ficar lento.
+CONSULTA_WORKERS = max(1, int(os.getenv("SIGAVI_CONSULTA_WORKERS", "8")))
 # Quantas vezes retentar uma busca com resposta suspeita/erro antes de desistir.
 CONSULTA_TENTATIVAS = max(1, int(os.getenv("SIGAVI_CONSULTA_TENTATIVAS", "3")))
 # Base (segundos) do backoff entre tentativas; cresce a cada tentativa.
