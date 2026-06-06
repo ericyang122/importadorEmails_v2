@@ -25,6 +25,28 @@ def parse_args():
         default=os.getenv("SIGAVI_RESULT_DIR", "resultados"),
         help="Pasta onde a planilha de resultado sera salva.",
     )
+    parser.add_argument(
+        "--mode",
+        choices=("consulta", "cadastro"),
+        default=os.getenv("SIGAVI_MODE", "consulta"),
+        help="Modo de execucao: consulta busca telefones por email; cadastro cadastra leads com telefone.",
+    )
+    parser.add_argument(
+        "--stop-file",
+        default=os.getenv("SIGAVI_STOP_FILE"),
+        help="Arquivo sentinela usado pela interface para pedir parada segura.",
+    )
+    parser.add_argument(
+        "--progress-file",
+        default=os.getenv("SIGAVI_PROGRESS_FILE"),
+        help="Arquivo JSON de progresso da execucao.",
+    )
+    parser.add_argument(
+        "--autosave-every",
+        type=int,
+        default=int(os.getenv("SIGAVI_AUTOSAVE_EVERY", "10")),
+        help="Quantidade de linhas processadas entre salvamentos dos Excels parciais.",
+    )
     return parser.parse_args()
 
 
@@ -34,6 +56,9 @@ SIGAVI_LOGIN = os.getenv("SIGAVI_LOGIN")
 SIGAVI_SENHA = os.getenv("SIGAVI_SENHA")
 HEADLESS = ARGS.headless or os.getenv("SIGAVI_HEADLESS", "").strip().lower() in {"1", "true", "yes", "sim"}
 RESULT_DIR = ARGS.result_dir
+MODE = ARGS.mode
+STOP_FILE = ARGS.stop_file
+AUTOSAVE_EVERY = max(1, ARGS.autosave_every)
 
 if not SIGAVI_LOGIN or not SIGAVI_SENHA:
     print("ERRO: informe SIGAVI_LOGIN e SIGAVI_SENHA no .env ou no ambiente da execucao.")
@@ -55,19 +80,29 @@ from selenium.common.exceptions import (
 )
 
 BASE_URL = "https://abyara.sigavi360.com.br"
+ULTIMO_ERRO_CONSULTA = None
 
 def carregar_progresso():
     if os.path.exists(PROGRESSO_FILE):
         with open(PROGRESSO_FILE, 'r', encoding='utf-8') as f:
             dados = json.load(f)
         print(f"Retomando do índice {dados['ultimo_index'] + 1} (progresso salvo encontrado).")
-        return dados['ultimo_index'], dados.get('resultados_email', [])
-    return -1, []
+        return (
+            dados.get('ultimo_index', -1),
+            dados.get('resultados_email', []),
+            dados.get('resultados_cadastro', []),
+        )
+    return -1, [], []
 
-def salvar_progresso(ultimo_index, resultados_email):
+def salvar_progresso(ultimo_index, resultados_email, resultados_cadastro):
+    os.makedirs(os.path.dirname(PROGRESSO_FILE) or '.', exist_ok=True)
     with open(PROGRESSO_FILE, 'w', encoding='utf-8') as f:
-        json.dump({'ultimo_index': ultimo_index, 'resultados_email': resultados_email},
-                  f, ensure_ascii=False)
+        json.dump({
+            'ultimo_index': ultimo_index,
+            'modo': MODE,
+            'resultados_email': resultados_email,
+            'resultados_cadastro': resultados_cadastro,
+        }, f, ensure_ascii=False)
 
 # =========================
 # DICIONÁRIO CORRETORES (carregado do corretores.json)
@@ -118,13 +153,14 @@ if 'FONE2' in df.columns:
     )
 
 _nome_excel    = os.path.splitext(os.path.basename(arquivo_excel.lstrip('./')))[0]
-PROGRESSO_FILE = f'progresso_{_nome_excel}.json'
+PROGRESSO_FILE = ARGS.progress_file or os.path.join(RESULT_DIR, f'progresso_{_nome_excel}_{MODE}.json')
 
-def _proximo_resultado_file():
-    i = 1
-    while os.path.exists(os.path.join(RESULT_DIR, f'resultado_{_nome_excel}_{i}.xlsx')):
-        i += 1
-    return os.path.join(RESULT_DIR, f'resultado_{_nome_excel}_{i}.xlsx')
+def parada_solicitada():
+    return bool(STOP_FILE and os.path.exists(STOP_FILE))
+
+
+def _resultado_file(sufixo):
+    return os.path.join(RESULT_DIR, f'resultado_{_nome_excel}_{sufixo}.xlsx')
 
 # =========================
 # CHROME + HELPERS
@@ -280,6 +316,8 @@ def extrair_telefone_do_html(html):
     return None
 
 def buscar_telefone_por_email(session, csrf_token, email):
+    global ULTIMO_ERRO_CONSULTA, req_csrf_token
+    ULTIMO_ERRO_CONSULTA = None
     payload = {
         'FacBusca': 'true',
         '__RequestVerificationToken': csrf_token,
@@ -324,12 +362,18 @@ def buscar_telefone_por_email(session, csrf_token, email):
                 novo_token = obter_csrf_token(session)
                 if novo_token:
                     req_csrf_token = novo_token
+                else:
+                    ULTIMO_ERRO_CONSULTA = 'Sessao expirada e CSRF token nao foi renovado.'
                 resp = session.post(
                     f"{BASE_URL}/CRM/Fac/Busca",
                     data={**payload, '__RequestVerificationToken': req_csrf_token},
                     headers={'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'Accept': '*/*'},
                     timeout=30,
                 )
+                if 'ReturnUrl' in resp.url or 'Login' in resp.url or 'login' in resp.text[:500].lower():
+                    ULTIMO_ERRO_CONSULTA = 'Sessao expirada mesmo apos renovar cookies.'
+                    print(f"  [!] sessao ainda expirada apos renovar cookies")
+                    return None
             tel = extrair_telefone_do_html(resp.text)
             if tel:
                 print(f"  [✓] {tel}")
@@ -337,8 +381,10 @@ def buscar_telefone_por_email(session, csrf_token, email):
                 print(f"  [✗] não encontrado ({len(resp.text)} chars)")
             return tel
         print(f"  [✗] status {resp.status_code}")
+        ULTIMO_ERRO_CONSULTA = f'Status HTTP inesperado: {resp.status_code}'
     except Exception as e:
         print(f"  → Erro ao buscar email {email}: {e}")
+        ULTIMO_ERRO_CONSULTA = str(e)
     return None
 
 def normalizar_texto(valor: str) -> str:
@@ -439,15 +485,18 @@ safe_click((By.XPATH, "/html/body/div[2]/section/div[1]/div/div/div/form/div[1]/
 time.sleep(2)
 
 # =========================
-# SESSION REQUESTS (para busca de email sem abrir aba)
+# SESSION REQUESTS (somente consulta)
 # =========================
-req_session = criar_session_requests()
-req_csrf_token = obter_csrf_token(req_session)
-if req_csrf_token:
-    print("Session de busca por email pronta.")
-else:
-    print("AVISO: Não foi possível obter CSRF token. Busca por email desabilitada.")
-    req_session = None
+req_session = None
+req_csrf_token = None
+if MODE == 'consulta':
+    req_session = criar_session_requests()
+    req_csrf_token = obter_csrf_token(req_session)
+    if req_csrf_token:
+        print("Session de busca por email pronta.")
+    else:
+        print("AVISO: Não foi possível obter CSRF token. Busca por email desabilitada.")
+        req_session = None
 
 # detecta coluna de email na planilha
 _email_col = next(
@@ -462,7 +511,7 @@ else:
 # =========================
 # LOOP DE CADASTRO
 # =========================
-_ultimo_index, resultados_email = carregar_progresso()
+_ultimo_index, resultados_email, resultados_cadastro = carregar_progresso()
 
 # pré-calcula quantas linhas não têm telefone (para o contador)
 if _email_col:
@@ -475,8 +524,12 @@ else:
     _total_emails = 0
 _email_count = 0
 
-driver.get('https://abyara.sigavi360.com.br/CRM/Fac')
-time.sleep(2)
+if MODE == 'consulta':
+    print("Modo selecionado: somente consulta.")
+else:
+    print("Modo selecionado: somente cadastro.")
+    driver.get('https://abyara.sigavi360.com.br/CRM/Fac')
+    time.sleep(2)
 
 # mapa para tolerar variações de caixa no dicionário
 mapa_corretores = {str(k).upper(): v for k, v in corretores_gerentes.items()}
@@ -489,44 +542,174 @@ for k, v in mapa_corretores.items():
     if base and base not in mapa_corretores_base:
         mapa_corretores_base[base] = v
 
-def _salvar_excel_resultado():
-    if not resultados_email:
-        return
+def _salvar_excel_resultado(anunciar=False):
     os.makedirs(RESULT_DIR, exist_ok=True)
-    arquivo = _proximo_resultado_file()
-    df_todos    = pd.DataFrame(resultados_email)
-    df_com_fone = df_todos[df_todos['Telefone'] != ''].reset_index(drop=True)
-    with pd.ExcelWriter(arquivo, engine='openpyxl') as writer:
-        df_com_fone.to_excel(writer, sheet_name='Com Telefone', index=False)
-        df_todos.to_excel(writer,    sheet_name='Todos',        index=False)
-    total    = len(df_todos)
-    com_fone = len(df_com_fone)
-    print(f"\nResultados salvos em {arquivo}")
-    print(f"RESULT_FILE={arquivo}")
-    print(f"Resumo: {com_fone} telefone(s) encontrado(s) de {total} email(s) buscado(s).")
+    arquivos_gerados = []
+
+    if MODE == 'consulta':
+        colunas = ['Linha', 'Nome', 'Email', 'Telefone', 'Status', 'Detalhe']
+        df_todos = pd.DataFrame(resultados_email, columns=colunas)
+        if df_todos.empty:
+            df_todos = pd.DataFrame(columns=colunas)
+
+        df_encontrados = df_todos[df_todos['Status'] == 'encontrado'].reset_index(drop=True)
+        df_nao_encontrados = df_todos[df_todos['Status'] == 'nao_encontrado'].reset_index(drop=True)
+        df_erros = df_todos[df_todos['Status'] == 'erro_consulta'].reset_index(drop=True)
+
+        relatorios = {
+            'encontrados': df_encontrados,
+            'nao_encontrados': df_nao_encontrados,
+            'erros_consulta': df_erros,
+        }
+    else:
+        colunas = ['Linha', 'Nome', 'Email', 'Telefone', 'Status', 'Detalhe']
+        df_todos = pd.DataFrame(resultados_cadastro, columns=colunas)
+        if df_todos.empty:
+            df_todos = pd.DataFrame(columns=colunas)
+
+        relatorios = {
+            'cadastrados': df_todos[df_todos['Status'] == 'cadastrado'].reset_index(drop=True),
+            'duplicados': df_todos[df_todos['Status'] == 'duplicado'].reset_index(drop=True),
+            'nao_cadastrados': df_todos[df_todos['Status'] == 'nao_cadastrado'].reset_index(drop=True),
+            'erros_cadastro': df_todos[df_todos['Status'] == 'erro_cadastro'].reset_index(drop=True),
+        }
+
+    for sufixo, dataframe in relatorios.items():
+        arquivo = _resultado_file(sufixo)
+        dataframe.to_excel(arquivo, sheet_name=sufixo[:31], index=False)
+        arquivos_gerados.append(arquivo)
+
+    if anunciar:
+        for arquivo in arquivos_gerados:
+            print(f"RESULT_FILE={arquivo}")
+        if MODE == 'consulta':
+            print(
+                "Resumo consulta: "
+                f"{len(relatorios['encontrados'])} encontrado(s), "
+                f"{len(relatorios['nao_encontrados'])} nao encontrado(s), "
+                f"{len(relatorios['erros_consulta'])} erro(s)."
+            )
+        else:
+            print(
+                "Resumo cadastro: "
+                f"{len(relatorios['cadastrados'])} cadastrado(s), "
+                f"{len(relatorios['duplicados'])} duplicado(s), "
+                f"{len(relatorios['nao_cadastrados'])} nao cadastrado(s), "
+                f"{len(relatorios['erros_cadastro'])} erro(s)."
+            )
+
+
+def salvar_estado(ultimo_index, anunciar=False):
+    salvar_progresso(ultimo_index, resultados_email, resultados_cadastro)
+    _salvar_excel_resultado(anunciar=anunciar)
+
+
+if MODE == 'consulta':
+    ultimo_processado = _ultimo_index
+    try:
+        for index, row in df.iterrows():
+            if index <= _ultimo_index:
+                continue
+
+            if parada_solicitada():
+                print("\nParada solicitada pela interface. Salvando resultados...")
+                salvar_estado(ultimo_processado, anunciar=True)
+                driver.quit()
+                raise SystemExit(0)
+
+            nome = str(row.get('NOME') or '').strip()
+            email_raw = ''
+            if _email_col:
+                email_raw = str(row.get(_email_col) or '').strip()
+
+            telefone_raw = str(row.get('FONE2') or '')
+            telefone = re.sub(r'\D', '', telefone_raw)
+
+            detalhe = ''
+            status = 'nao_encontrado'
+
+            if not email_raw:
+                status = 'erro_consulta'
+                detalhe = 'Email ausente na planilha.'
+                print(f"[Linha {index + 1}] email ausente")
+            elif len(telefone) >= 11:
+                status = 'encontrado'
+                detalhe = 'Telefone ja estava na planilha.'
+                print(f"[Linha {index + 1}] {email_raw}")
+                print(f"  [✓] {telefone} (planilha)")
+            elif req_session and req_csrf_token:
+                _email_count += 1
+                print(f"[Email {_email_count}/{_total_emails}] {email_raw}")
+                telefone = buscar_telefone_por_email(req_session, req_csrf_token, email_raw) or ''
+                if len(telefone) >= 10:
+                    status = 'encontrado'
+                    detalhe = 'Telefone encontrado por email.'
+                elif ULTIMO_ERRO_CONSULTA:
+                    status = 'erro_consulta'
+                    detalhe = ULTIMO_ERRO_CONSULTA
+                else:
+                    status = 'nao_encontrado'
+                    detalhe = 'Telefone nao encontrado por email.'
+            else:
+                status = 'erro_consulta'
+                detalhe = 'Sessao de consulta indisponivel.'
+
+            resultados_email.append({
+                'Linha': index + 1,
+                'Nome': nome,
+                'Email': email_raw,
+                'Telefone': telefone if status == 'encontrado' else '',
+                'Status': status,
+                'Detalhe': detalhe,
+            })
+
+            ultimo_processado = index
+            salvar_progresso(ultimo_processado, resultados_email, resultados_cadastro)
+            if len(resultados_email) % AUTOSAVE_EVERY == 0:
+                _salvar_excel_resultado()
+
+        print("Consulta concluida!")
+        salvar_estado(ultimo_processado, anunciar=True)
+        driver.quit()
+        raise SystemExit(0)
+
+    except KeyboardInterrupt:
+        print("\n\nPausado pelo usuario. Salvando resultados...")
+        salvar_estado(ultimo_processado, anunciar=True)
+        driver.quit()
+        raise SystemExit(0)
 
 try:
     for index, row in df.iterrows():
         if index <= _ultimo_index:
             continue
+        if parada_solicitada():
+            print("\nParada solicitada pela interface. Salvando resultados...")
+            salvar_estado(index - 1, anunciar=True)
+            driver.quit()
+            raise SystemExit(0)
+
         nome = str(row.get('NOME') or '').strip()
+        email_raw = ''
+        if _email_col:
+            email_raw = str(row.get(_email_col) or '').strip()
 
         # sanitiza telefone (só dígitos)
         telefone_raw = str(row.get('FONE2') or '')
         telefone = re.sub(r'\D', '', telefone_raw)
     
-        # se não tem telefone, tenta buscar pelo email
         if len(telefone) < 11:
-            email_raw = ''
-            if _email_col:
-                email_raw = str(row.get(_email_col) or '').strip()
-            if email_raw and req_session and req_csrf_token:
-                _email_count += 1
-                print(f"[Email {_email_count}/{_total_emails}] {email_raw}")
-                telefone = buscar_telefone_por_email(req_session, req_csrf_token, email_raw) or ''
-                resultados_email.append({'Nome': nome, 'Email': email_raw, 'Telefone': telefone})
-            if len(telefone) < 11:
-                continue
+            print(f"[NAO CADASTRADO] linha {index + 1}: telefone ausente ou invalido.")
+            resultados_cadastro.append({
+                'Linha': index + 1,
+                'Nome': nome,
+                'Email': email_raw,
+                'Telefone': telefone,
+                'Status': 'nao_cadastrado',
+                'Detalhe': 'Telefone ausente ou invalido na planilha.',
+            })
+            salvar_estado(index)
+            continue
     
         corretor_original_raw = str(row.get('CORRETOR DE ORIGEM') or '')
         corretor_original_norm = re.sub(r'\s+', ' ', corretor_original_raw).strip().upper()
@@ -559,6 +742,8 @@ try:
             telefone_busca_locator = (By.XPATH, '/html/body/section/section/div/div/div[2]/div/div[1]/form/div[2]/div/div/div/div[10]/div[4]/input')
             telefone_elem_busca = None
             for tentativa in range(3):
+                if parada_solicitada():
+                    raise KeyboardInterrupt
                 driver.get('https://abyara.sigavi360.com.br/CRM/Fac')
                 time.sleep(3)
                 try:
@@ -568,6 +753,15 @@ try:
                     print(f"Página /CRM/Fac não carregou (tentativa {tentativa+1}/3). Tentando novamente...")
             if telefone_elem_busca is None:
                 print(f"Não foi possível carregar a página de busca após 3 tentativas. Pulando {nome}.")
+                resultados_cadastro.append({
+                    'Linha': index + 1,
+                    'Nome': nome,
+                    'Email': email_raw,
+                    'Telefone': telefone,
+                    'Status': 'erro_cadastro',
+                    'Detalhe': 'Pagina /CRM/Fac nao carregou para verificar duplicidade.',
+                })
+                salvar_estado(index)
                 continue
             scroll_into_view(telefone_elem_busca)
     
@@ -597,6 +791,15 @@ try:
                 pass
     
             if duplicado:
+                resultados_cadastro.append({
+                    'Linha': index + 1,
+                    'Nome': nome,
+                    'Email': email_raw,
+                    'Telefone': telefone,
+                    'Status': 'duplicado',
+                    'Detalhe': 'Telefone ja encontrado no Sigavi antes do cadastro.',
+                })
+                salvar_estado(index)
                 continue
     
             # navegação leve (como no seu script)
@@ -692,6 +895,15 @@ try:
                 safe_click((By.XPATH, '//*[@id="popVerificaDuplicidade"]/div/div/div[3]/button'))
                 time.sleep(0.5)
                 print(f"Lead duplicado encontrado para telefone {telefone}. Pulando {nome}.")
+                resultados_cadastro.append({
+                    'Linha': index + 1,
+                    'Nome': nome,
+                    'Email': email_raw,
+                    'Telefone': telefone,
+                    'Status': 'duplicado',
+                    'Detalhe': 'Popup de duplicidade apareceu no cadastro.',
+                })
+                salvar_estado(index)
                 continue
             except Exception:
                 pass
@@ -699,6 +911,15 @@ try:
             # 3) Salvar
             safe_click((By.XPATH, '//*[@id="cmdSalva"]'))
             time.sleep(3)
+            print(f"[CADASTRADO] {telefone}")
+            resultados_cadastro.append({
+                'Linha': index + 1,
+                'Nome': nome,
+                'Email': email_raw,
+                'Telefone': telefone,
+                'Status': 'cadastrado',
+                'Detalhe': 'Lead cadastrado no Sigavi.',
+            })
     
         except (InvalidSessionIdException, WebDriverException) as e:
             print(f"[ERRO] Browser caiu — reconectando...")
@@ -711,21 +932,51 @@ try:
                     time.sleep(5)
             else:
                 print("[ERRO] Não foi possível reconectar. Encerrando.")
+                resultados_cadastro.append({
+                    'Linha': index + 1,
+                    'Nome': nome,
+                    'Email': email_raw,
+                    'Telefone': telefone,
+                    'Status': 'erro_cadastro',
+                    'Detalhe': f'Falha ao reconectar navegador: {e}',
+                })
+                salvar_estado(index, anunciar=True)
                 raise SystemExit(1)
+            resultados_cadastro.append({
+                'Linha': index + 1,
+                'Nome': nome,
+                'Email': email_raw,
+                'Telefone': telefone,
+                'Status': 'erro_cadastro',
+                'Detalhe': f'Browser caiu durante cadastro: {e}',
+            })
+            salvar_estado(index)
+            continue
+        except Exception as e:
+            print(f"[ERRO] Falha ao cadastrar {nome}: {e}")
+            resultados_cadastro.append({
+                'Linha': index + 1,
+                'Nome': nome,
+                'Email': email_raw,
+                'Telefone': telefone,
+                'Status': 'erro_cadastro',
+                'Detalhe': str(e),
+            })
+            salvar_estado(index)
             continue
     
-        salvar_progresso(index, resultados_email)
+        salvar_progresso(index, resultados_email, resultados_cadastro)
+        if len(resultados_cadastro) % AUTOSAVE_EVERY == 0:
+            _salvar_excel_resultado()
 
 except KeyboardInterrupt:
-    print("\n\nPausado pelo usuário. Progresso salvo.")
-    salvar_progresso(_ultimo_index, resultados_email)
-    _salvar_excel_resultado()
+    print("\n\nPausado pelo usuário. Salvando resultados...")
+    ultimo_seguro = locals().get('index', _ultimo_index)
+    salvar_estado(ultimo_seguro, anunciar=True)
     driver.quit()
     raise SystemExit(0)
 
 print("Processamento concluído!")
-if os.path.exists(PROGRESSO_FILE):
-    os.remove(PROGRESSO_FILE)
 driver.quit()
-_salvar_excel_resultado()
+salvar_estado(len(df) - 1, anunciar=True)
 

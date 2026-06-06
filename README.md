@@ -62,18 +62,32 @@ A planilha deve ter (ou ser renomeável para) as colunas:
 
 ## Uso
 
+### Somente consulta
+
+Busca telefone por email e nao cadastra nada no Sigavi:
+
 ```bash
-python confio.py
+python confio.py --mode consulta --excel ./abertos/abertos_cora.xlsx
 ```
 
-O script vai:
-1. Abrir o Chrome e fazer login no Sigavi
-2. Para cada lead da planilha:
-   - Se tem telefone → verifica duplicidade e cadastra
-   - Se não tem telefone → busca no Sigavi pelo email
-3. Ao final, salva `resultados/resultado_<arquivo>_1.xlsx` com duas abas:
-   - **Com Telefone** — emails que tiveram telefone encontrado
-   - **Todos** — todos os emails buscados
+Relatorios gerados:
+- `resultado_<arquivo>_encontrados.xlsx`
+- `resultado_<arquivo>_nao_encontrados.xlsx`
+- `resultado_<arquivo>_erros_consulta.xlsx`
+
+### Somente cadastro
+
+Usa telefones ja existentes na planilha para verificar duplicidade e cadastrar leads no Sigavi:
+
+```bash
+python confio.py --mode cadastro --excel ./abertos/abertos_cora.xlsx
+```
+
+Relatorios gerados:
+- `resultado_<arquivo>_cadastrados.xlsx`
+- `resultado_<arquivo>_duplicados.xlsx`
+- `resultado_<arquivo>_nao_cadastrados.xlsx`
+- `resultado_<arquivo>_erros_cadastro.xlsx`
 
 ### Pausar e retomar
 - Pressione `Ctrl+C` para pausar — o progresso é salvo automaticamente
@@ -123,9 +137,17 @@ APP_SECRET_KEY=uma_chave_grande_aleatoria
 `APP_PASSWORD` e a senha da tela do importador. Ela protege o acesso antes de aparecer o formulario do Sigavi.
 `APP_SECRET_KEY` e uma chave interna do Flask para assinar a sessao do navegador; use um texto grande e aleatorio e nao compartilhe.
 
-Na tela, o usuario informa login/senha do Sigavi e envia a planilha `.xlsx`.
+Na tela, o usuario escolhe `Somente consulta` ou `Somente cadastro`, informa login/senha do Sigavi e envia a planilha `.xlsx`.
 Essas credenciais nao sao gravadas em `.env`; elas sao passadas apenas para a execucao do `confio.py`.
-A planilha enviada e apagada quando a execucao termina. A planilha de resultado fica disponivel para download e e apagada apos baixar ou ao iniciar outra execucao.
+A interface tambem tem o botao `Parar e salvar`, que pede parada segura e grava os resultados no proximo ponto de salvamento.
+
+Cada execucao cria um backup em `backups/` com:
+- planilha de entrada;
+- relatorios gerados;
+- `progresso.json`;
+- `log.txt`.
+
+A pasta `uploads/` e temporaria. A pasta `backups/` deve ser preservada para retomada e auditoria.
 
 O script tambem aceita planilha por parametro:
 
@@ -143,4 +165,10 @@ Para escolher a pasta de resultado:
 
 ```bash
 python confio.py --excel ./abertos/abertos_cora.xlsx --result-dir ./resultados
+```
+
+Para escolher arquivo de progresso e parada segura:
+
+```bash
+python confio.py --mode consulta --excel ./abertos/abertos_cora.xlsx --progress-file ./backups/teste/progresso.json --stop-file ./backups/teste/parar.flag
 ```

@@ -9,6 +9,10 @@
   --accent-hover: #083b7b;
   --danger: #c1121f;
   --danger-hover: #9f0f19;
+  --success: #16803c;
+  --success-hover: #0f6530;
+  --success-bg: #effaf3;
+  --success-line: #a8ddb9;
   --warning: #8a4b0f;
   --warning-bg: #fff7db;
   --ok-bg: #e7f0ff;
@@ -52,6 +56,12 @@ button:hover {
 button:disabled {
   cursor: not-allowed;
   opacity: 0.65;
+}
+
+fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
 }
 
 input {
@@ -201,6 +211,72 @@ h2 {
   width: 18px;
 }
 
+.mode-group {
+  display: grid;
+  gap: 10px;
+}
+
+.mode-group legend {
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.mode-card {
+  align-items: flex-start;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  padding: 12px;
+}
+
+.mode-card:has(input:checked) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgb(11 78 162 / 12%);
+}
+
+.mode-card input {
+  flex: 0 0 auto;
+  height: 18px;
+  margin: 2px 0 0;
+  min-height: 18px;
+  width: 18px;
+}
+
+.mode-card strong,
+.mode-card small {
+  display: block;
+}
+
+.mode-card strong {
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+
+.mode-card small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.action-row {
+  display: grid;
+  gap: 10px;
+}
+
+.danger-button {
+  background: var(--danger);
+}
+
+.danger-button:hover {
+  background: var(--danger-hover);
+}
+
 .status-badge,
 #job-id {
   border-radius: 999px;
@@ -238,6 +314,37 @@ h2 {
   overflow: hidden;
 }
 
+.metrics-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 14px;
+}
+
+.metrics-grid div {
+  background: #f6f8fb;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 10px;
+}
+
+.metrics-grid strong {
+  color: var(--accent);
+  display: block;
+  font-size: 18px;
+  line-height: 1.1;
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+
+.metrics-grid span {
+  color: var(--muted);
+  display: block;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 #log-output {
   background: #101923;
   border-left: 4px solid var(--accent);
@@ -256,9 +363,9 @@ h2 {
 }
 
 .download-card {
-  align-items: center;
-  background: #fff5f5;
-  border: 1px solid #f1b7bd;
+  align-items: flex-start;
+  background: var(--success-bg);
+  border: 1px solid var(--success-line);
   border-radius: 7px;
   display: flex;
   gap: 14px;
@@ -267,8 +374,12 @@ h2 {
   padding: 14px;
 }
 
+.download-card > div:first-child {
+  min-width: 0;
+}
+
 .download-card strong {
-  color: var(--danger);
+  color: var(--success);
   display: block;
   font-size: 14px;
   margin-bottom: 3px;
@@ -283,20 +394,29 @@ h2 {
 
 .download-button {
   align-items: center;
-  background: var(--danger);
+  background: var(--success);
   border-radius: 6px;
   color: #ffffff;
   display: inline-flex;
   font-size: 14px;
   font-weight: 800;
+  justify-content: center;
   min-height: 40px;
+  max-width: 100%;
   padding: 0 14px;
   text-decoration: none;
-  white-space: nowrap;
+  text-align: center;
+  overflow-wrap: anywhere;
 }
 
 .download-button:hover {
-  background: var(--danger-hover);
+  background: var(--success-hover);
+}
+
+.download-list {
+  display: grid;
+  gap: 8px;
+  min-width: min(260px, 100%);
 }
 
 .hidden {
@@ -315,6 +435,18 @@ h2 {
 
   .log-panel {
     height: 620px;
+  }
+
+  .download-card {
+    flex-direction: column;
+  }
+
+  .download-list {
+    width: 100%;
+  }
+
+  .metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .panel {

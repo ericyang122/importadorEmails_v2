@@ -50,6 +50,24 @@
           <span id="status-badge" class="status-badge idle">Pronto</span>
         </div>
 
+        <fieldset class="mode-group">
+          <legend>Tipo de execução</legend>
+          <label class="mode-card">
+            <input type="radio" name="mode" value="consulta" checked>
+            <span>
+              <strong>Somente consulta</strong>
+              <small>Busca telefones por email e gera relatórios. Não cadastra nada no Sigavi.</small>
+            </span>
+          </label>
+          <label class="mode-card">
+            <input type="radio" name="mode" value="cadastro">
+            <span>
+              <strong>Somente cadastro</strong>
+              <small>Usa telefones já existentes na planilha para cadastrar leads no Sigavi.</small>
+            </span>
+          </label>
+        </fieldset>
+
         <label>
           Login Sigavi
           <input type="email" name="sigavi_login" autocomplete="username" required>
@@ -70,7 +88,10 @@
           Rodar navegador oculto
         </label>
 
-        <button id="submit-button" type="submit">Executar automação</button>
+        <div class="action-row">
+          <button id="submit-button" type="submit">Executar automação</button>
+          <button id="stop-button" class="danger-button" type="button" disabled>Parar e salvar</button>
+        </div>
       </form>
 
       <section class="panel log-panel">
@@ -78,13 +99,31 @@
           <h2>Status</h2>
           <span id="job-id">Sem execução</span>
         </div>
+        <div class="metrics-grid">
+          <div>
+            <strong id="metric-processed">0</strong>
+            <span>Processados</span>
+          </div>
+          <div>
+            <strong id="metric-success">0</strong>
+            <span>Sucessos</span>
+          </div>
+          <div>
+            <strong id="metric-pending">0</strong>
+            <span>Pendentes</span>
+          </div>
+          <div>
+            <strong id="metric-errors">0</strong>
+            <span>Erros</span>
+          </div>
+        </div>
         <pre id="log-output">Aguardando planilha.</pre>
         <div id="download-card" class="download-card hidden">
           <div>
-            <strong>Resultado pronto</strong>
-            <span id="download-filename">resultado.xlsx</span>
+            <strong>Resultados prontos</strong>
+            <span>Baixe os arquivos antes de iniciar outra execução.</span>
           </div>
-          <a id="download-link" class="download-button" href="#">Baixar planilha</a>
+          <div id="download-list" class="download-list"></div>
         </div>
       </section>
     </section>

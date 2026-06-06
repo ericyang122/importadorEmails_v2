@@ -16,12 +16,14 @@ from werkzeug.utils import secure_filename
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_ROOT = BASE_DIR / "uploads"
+BACKUP_ROOT = BASE_DIR / "backups"
 MAX_LOG_LINES = 2000
-RUNNING_STATUSES = {"queued", "running"}
+RUNNING_STATUSES = {"queued", "running", "stopping"}
 XLSX_MIMETYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 load_dotenv(BASE_DIR / ".env")
 UPLOAD_ROOT.mkdir(exist_ok=True)
+BACKUP_ROOT.mkdir(exist_ok=True)
 
 app = Flask(__name__)
 app.secret_key = os.getenv("APP_SECRET_KEY") or secrets.token_hex(32)
@@ -74,6 +76,19 @@ def sanitize_log(line, secrets_to_hide):
     return clean_line
 
 
+def backup_slug(filename):
+    stem = secure_filename(Path(filename).stem) or "planilha"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{timestamp}_{stem}_{uuid.uuid4().hex[:8]}"
+
+
+def append_file_log(log_path, line, secrets_to_hide):
+    clean_line = sanitize_log(line, secrets_to_hide)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as log_file:
+        log_file.write(clean_line)
+
+
 def append_log(job_id, line, secrets_to_hide=None):
     secrets_to_hide = secrets_to_hide or []
     with JOBS_LOCK:
@@ -100,7 +115,7 @@ def cleanup_finished_job_files():
         for job_id in finished_job_ids:
             job = JOBS[job_id]
             job["download_available"] = False
-            job["result_path"] = None
+            job["result_files"] = []
             if not job.get("result_deleted_at"):
                 job["result_deleted_at"] = datetime.now().isoformat(timespec="seconds")
 
@@ -117,26 +132,32 @@ def set_job_status(job_id, status, **extra):
         job.update(extra)
 
 
-def latest_result_file(result_dir):
-    files = list(result_dir.glob("*.xlsx"))
-    if not files:
-        return None
-    return max(files, key=lambda item: item.stat().st_mtime)
+def result_file_entries(result_dir):
+    files = sorted(result_dir.glob("*.xlsx"), key=lambda item: item.name)
+    return [
+        {
+            "id": str(index),
+            "filename": file_path.name,
+            "path": str(file_path),
+            "downloaded": False,
+        }
+        for index, file_path in enumerate(files)
+    ]
 
 
-def register_result_file(job_id, result_path):
-    if not result_path:
+def register_result_files(job_id, result_dir):
+    entries = result_file_entries(result_dir)
+    if not entries:
         return
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if not job:
             return
         job["download_available"] = True
-        job["result_filename"] = result_path.name
-        job["result_path"] = str(result_path)
+        job["result_files"] = entries
 
 
-def run_automation(job_id, excel_path, result_dir, sigavi_login, sigavi_senha, headless):
+def run_automation(job_id, excel_path, result_dir, progress_file, stop_file, log_path, mode, sigavi_login, sigavi_senha, headless):
     secrets_to_hide = [sigavi_login, sigavi_senha]
     command = [
         sys.executable,
@@ -146,6 +167,12 @@ def run_automation(job_id, excel_path, result_dir, sigavi_login, sigavi_senha, h
         str(excel_path),
         "--result-dir",
         str(result_dir),
+        "--progress-file",
+        str(progress_file),
+        "--stop-file",
+        str(stop_file),
+        "--mode",
+        mode,
     ]
     if headless:
         command.append("--headless")
@@ -157,6 +184,7 @@ def run_automation(job_id, excel_path, result_dir, sigavi_login, sigavi_senha, h
 
     set_job_status(job_id, "running", started_at=datetime.now().isoformat(timespec="seconds"))
     append_log(job_id, "Automacao iniciada.\n", secrets_to_hide)
+    append_file_log(log_path, "Automacao iniciada.\n", secrets_to_hide)
 
     return_code = None
     try:
@@ -177,22 +205,29 @@ def run_automation(job_id, excel_path, result_dir, sigavi_login, sigavi_senha, h
             if process.stdout:
                 for line in process.stdout:
                     append_log(job_id, line, secrets_to_hide)
+                    append_file_log(log_path, line, secrets_to_hide)
 
             return_code = process.wait()
 
-        result_path = latest_result_file(result_dir)
-        if result_path:
-            register_result_file(job_id, result_path)
+        register_result_files(job_id, result_dir)
 
         finished_at = datetime.now().isoformat(timespec="seconds")
         if return_code == 0:
-            append_log(job_id, "\nAutomacao concluida.\n", secrets_to_hide)
-            set_job_status(job_id, "completed", return_code=return_code, finished_at=finished_at)
+            if stop_file.exists():
+                append_log(job_id, "\nAutomacao parada com resultados salvos.\n", secrets_to_hide)
+                append_file_log(log_path, "\nAutomacao parada com resultados salvos.\n", secrets_to_hide)
+                set_job_status(job_id, "stopped", return_code=return_code, finished_at=finished_at)
+            else:
+                append_log(job_id, "\nAutomacao concluida.\n", secrets_to_hide)
+                append_file_log(log_path, "\nAutomacao concluida.\n", secrets_to_hide)
+                set_job_status(job_id, "completed", return_code=return_code, finished_at=finished_at)
         else:
             append_log(job_id, f"\nAutomacao finalizada com erro. Codigo: {return_code}\n", secrets_to_hide)
+            append_file_log(log_path, f"\nAutomacao finalizada com erro. Codigo: {return_code}\n", secrets_to_hide)
             set_job_status(job_id, "failed", return_code=return_code, finished_at=finished_at)
     except Exception as exc:
         append_log(job_id, f"\nErro ao executar automacao: {exc}\n", secrets_to_hide)
+        append_file_log(log_path, f"\nErro ao executar automacao: {exc}\n", secrets_to_hide)
         set_job_status(
             job_id,
             "failed",
@@ -204,10 +239,13 @@ def run_automation(job_id, excel_path, result_dir, sigavi_login, sigavi_senha, h
             excel_path.unlink(missing_ok=True)
         except OSError:
             pass
+        try:
+            stop_file.unlink(missing_ok=True)
+        except OSError:
+            pass
 
-        result_path = latest_result_file(result_dir)
-        if result_path:
-            register_result_file(job_id, result_path)
+        if result_file_entries(result_dir):
+            register_result_files(job_id, result_dir)
         else:
             shutil.rmtree(excel_path.parent, ignore_errors=True)
 
@@ -256,9 +294,12 @@ def create_job():
     sigavi_senha = request.form.get("sigavi_senha", "")
     upload = request.files.get("planilha")
     headless = request.form.get("headless") == "on"
+    mode = request.form.get("mode", "consulta")
 
     if not sigavi_login or not sigavi_senha:
         return jsonify({"error": "Informe login e senha do Sigavi."}), 400
+    if mode not in {"consulta", "cadastro"}:
+        return jsonify({"error": "Modo de execucao invalido."}), 400
     if not upload or not upload.filename:
         return jsonify({"error": "Envie uma planilha .xlsx."}), 400
 
@@ -270,31 +311,43 @@ def create_job():
     job_id = uuid.uuid4().hex
     job_dir = UPLOAD_ROOT / job_id
     job_dir.mkdir(parents=True, exist_ok=False)
-    result_dir = job_dir / "resultado"
+    backup_dir = BACKUP_ROOT / backup_slug(original_name)
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    result_dir = backup_dir / "resultados"
     result_dir.mkdir(exist_ok=False)
+    progress_file = backup_dir / "progresso.json"
+    stop_file = job_dir / "parar-e-salvar.flag"
+    log_path = backup_dir / "log.txt"
     excel_path = job_dir / f"{job_id}_{original_name}"
     upload.save(excel_path)
+    shutil.copy2(excel_path, backup_dir / f"entrada_{original_name}")
 
     with JOBS_LOCK:
         JOBS[job_id] = {
             "id": job_id,
             "status": "queued",
+            "mode": mode,
             "filename": upload.filename,
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "started_at": None,
             "finished_at": None,
             "return_code": None,
             "pid": None,
+            "backup_dir": str(backup_dir),
+            "stop_file": str(stop_file),
             "download_available": False,
-            "result_filename": None,
-            "result_path": None,
+            "result_files": [],
             "result_deleted_at": None,
-            "logs": [f"Planilha recebida: {upload.filename}\n"],
+            "logs": [
+                f"Modo selecionado: {'Somente consulta' if mode == 'consulta' else 'Somente cadastro'}\n",
+                f"Planilha recebida: {upload.filename}\n",
+                f"Backup criado em: {backup_dir}\n",
+            ],
         }
 
     thread = threading.Thread(
         target=run_automation,
-        args=(job_id, excel_path, result_dir, sigavi_login, sigavi_senha, headless),
+        args=(job_id, excel_path, result_dir, progress_file, stop_file, log_path, mode, sigavi_login, sigavi_senha, headless),
         daemon=True,
     )
     thread.start()
@@ -311,34 +364,80 @@ def get_job(job_id):
             return jsonify({"error": "Execucao nao encontrada."}), 404
         payload = dict(job)
         payload["logs"] = list(job["logs"])
+        result_files = [
+            {"id": item["id"], "filename": item["filename"]}
+            for item in job.get("result_files", [])
+            if not item.get("downloaded")
+        ]
+        payload["result_files"] = result_files
+        payload["download_available"] = bool(result_files)
     return jsonify(payload)
 
 
-@app.get("/jobs/<job_id>/download")
+@app.post("/jobs/<job_id>/stop")
 @login_required
-def download_result(job_id):
+def stop_job(job_id):
+    if not check_csrf():
+        return jsonify({"error": "Sessao expirada. Atualize a pagina."}), 400
+
     with JOBS_LOCK:
         job = JOBS.get(job_id)
-        if not job or not job.get("download_available") or not job.get("result_path"):
+        if not job:
+            return jsonify({"error": "Execucao nao encontrada."}), 404
+        if job["status"] not in RUNNING_STATUSES:
+            return jsonify({"error": "Execucao nao esta rodando."}), 409
+        stop_file = Path(job["stop_file"])
+        job["status"] = "stopping"
+
+    stop_file.parent.mkdir(parents=True, exist_ok=True)
+    stop_file.write_text("parar", encoding="utf-8")
+    append_log(job_id, "\nParada solicitada. Salvando resultados no proximo ponto seguro...\n")
+    return jsonify({"ok": True})
+
+
+def _serve_result_file(job_id, file_id=None):
+    selected_file = None
+    remaining_files = []
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
             return jsonify({"error": "Resultado nao disponivel."}), 404
-        result_path = Path(job["result_path"])
-        result_filename = job.get("result_filename") or "resultado.xlsx"
+
+        available_files = [
+            item
+            for item in job.get("result_files", [])
+            if not item.get("downloaded")
+        ]
+        if file_id is None and available_files:
+            selected_file = available_files[0]
+        else:
+            selected_file = next((item for item in available_files if item["id"] == file_id), None)
+
+        if not selected_file:
+            return jsonify({"error": "Resultado nao disponivel."}), 404
+
+        result_path = Path(selected_file["path"])
+        result_filename = selected_file["filename"]
 
     if not result_path.exists():
         return jsonify({"error": "Arquivo de resultado nao encontrado."}), 404
 
     data = result_path.read_bytes()
-    shutil.rmtree(UPLOAD_ROOT / job_id, ignore_errors=True)
-
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if job:
-            job["download_available"] = False
-            job["result_path"] = None
-            job["result_deleted_at"] = datetime.now().isoformat(timespec="seconds")
 
     headers = {"Content-Disposition": f'attachment; filename="{secure_filename(result_filename)}"'}
     return Response(data, mimetype=XLSX_MIMETYPE, headers=headers)
+
+
+@app.get("/jobs/<job_id>/download")
+@login_required
+def download_result(job_id):
+    return _serve_result_file(job_id)
+
+
+@app.get("/jobs/<job_id>/download/<file_id>")
+@login_required
+def download_result_file(job_id, file_id):
+    return _serve_result_file(job_id, file_id)
 
 
 @app.get("/health")

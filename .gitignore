@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 progresso_*.json
 uploads/
+backups/
 flask*.log
 abertos/*.xlsx
 resultados/*.xlsx
