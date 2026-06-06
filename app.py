@@ -1,3 +1,4 @@
+import json
 import os
 import secrets
 import shutil
@@ -87,6 +88,22 @@ def append_file_log(log_path, line, secrets_to_hide):
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a", encoding="utf-8") as log_file:
         log_file.write(clean_line)
+
+
+def update_progress(job_id, line):
+    """Le uma linha 'PROGRESS={...}' emitida pelo confio.py e guarda no job.
+
+    Esses contadores sao a fonte de verdade do painel (substituem a contagem
+    antiga feita lendo os logs, que perdia sucessos quando o buffer rotacionava).
+    """
+    try:
+        data = json.loads(line[len("PROGRESS="):].strip())
+    except (ValueError, TypeError):
+        return
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if job:
+            job["progress"] = data
 
 
 def append_log(job_id, line, secrets_to_hide=None):
@@ -204,6 +221,9 @@ def run_automation(job_id, excel_path, result_dir, progress_file, stop_file, log
 
             if process.stdout:
                 for line in process.stdout:
+                    if line.startswith("PROGRESS="):
+                        update_progress(job_id, line)
+                        continue
                     append_log(job_id, line, secrets_to_hide)
                     append_file_log(log_path, line, secrets_to_hide)
 
@@ -338,6 +358,7 @@ def create_job():
             "download_available": False,
             "result_files": [],
             "result_deleted_at": None,
+            "progress": None,
             "logs": [
                 f"Modo selecionado: {'Somente consulta' if mode == 'consulta' else 'Somente cadastro'}\n",
                 f"Planilha recebida: {upload.filename}\n",

@@ -10,6 +10,8 @@ const metricProcessed = document.querySelector("#metric-processed");
 const metricSuccess = document.querySelector("#metric-success");
 const metricPending = document.querySelector("#metric-pending");
 const metricErrors = document.querySelector("#metric-errors");
+const progressBar = document.querySelector("#progress-bar");
+const progressLabel = document.querySelector("#progress-label");
 
 let currentJobId = null;
 let pollTimer = null;
@@ -28,22 +30,36 @@ function setBusy(isBusy) {
 function renderLogs(lines) {
   logOutput.textContent = lines.length ? lines.join("") : "Sem logs ainda.";
   logOutput.scrollTop = logOutput.scrollHeight;
-  updateMetrics(lines);
 }
 
-function updateMetrics(lines) {
-  const text = lines.join("");
-  const emailMatches = [...text.matchAll(/\[Email\s+(\d+)\/(\d+)\]/g)];
-  const lastEmail = emailMatches.at(-1);
-  const processed = lastEmail ? `${lastEmail[1]}/${lastEmail[2]}` : String((text.match(/\[CADASTRADO\]|\[DUPLICADO\]|\[NAO CADASTRADO\]/g) || []).length);
-  const successes = (text.match(/\[✓\]|\[CADASTRADO\]/g) || []).length;
-  const pending = (text.match(/\[✗\]|\[DUPLICADO\]|\[NAO CADASTRADO\]/g) || []).length;
-  const errors = (text.match(/\[ERRO\]|erro_consulta|erro_cadastro/g) || []).length;
+function setProgressBar(processed, total) {
+  const pct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+  if (progressBar) {
+    progressBar.style.width = `${pct}%`;
+  }
+  if (progressLabel) {
+    progressLabel.textContent = total > 0 ? `${processed}/${total} (${pct}%)` : "";
+  }
+}
 
-  metricProcessed.textContent = processed;
-  metricSuccess.textContent = successes;
-  metricPending.textContent = pending;
-  metricErrors.textContent = errors;
+function updateMetrics(data) {
+  // Fonte de verdade: contadores reais enviados pelo backend (campo progress).
+  const progress = data.progress;
+  if (progress) {
+    metricProcessed.textContent = `${progress.processados}/${progress.total}`;
+    metricSuccess.textContent = progress.sucessos;
+    metricPending.textContent = progress.pendentes;
+    metricErrors.textContent = progress.erros;
+    setProgressBar(progress.processados, progress.total);
+    return;
+  }
+
+  // Fallback (antes do primeiro progresso chegar): contagem aproximada por log.
+  const text = (data.logs || []).join("");
+  metricProcessed.textContent = String((text.match(/\[CADASTRADO\]|\[DUPLICADO\]|\[NAO CADASTRADO\]/g) || []).length);
+  metricSuccess.textContent = (text.match(/\[✓\]|\[CADASTRADO\]/g) || []).length;
+  metricPending.textContent = (text.match(/\[✗\]|\[DUPLICADO\]|\[NAO CADASTRADO\]/g) || []).length;
+  metricErrors.textContent = (text.match(/\[ERRO\]|erro_consulta|erro_cadastro/g) || []).length;
 }
 
 function hideDownload() {
@@ -85,6 +101,7 @@ async function pollJob() {
   }
 
   renderLogs(data.logs || []);
+  updateMetrics(data);
   updateDownload(data);
 
   if (data.status === "queued") {

@@ -4,6 +4,8 @@ import time
 import json
 import os
 import unicodedata
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import requests
 from dotenv import load_dotenv
@@ -80,7 +82,15 @@ from selenium.common.exceptions import (
 )
 
 BASE_URL = "https://abyara.sigavi360.com.br"
-ULTIMO_ERRO_CONSULTA = None
+# Quantas buscas por email rodam em paralelo no modo consulta.
+# 4 e um valor seguro: paraleliza sem fazer o Sigavi limitar (throttle) as respostas.
+CONSULTA_WORKERS = max(1, int(os.getenv("SIGAVI_CONSULTA_WORKERS", "4")))
+# Quantas vezes retentar uma busca com resposta suspeita/erro antes de desistir.
+CONSULTA_TENTATIVAS = max(1, int(os.getenv("SIGAVI_CONSULTA_TENTATIVAS", "3")))
+# Base (segundos) do backoff entre tentativas; cresce a cada tentativa.
+CONSULTA_BACKOFF = float(os.getenv("SIGAVI_CONSULTA_BACKOFF", "1.5"))
+# Protege a renovacao de cookies/token (o driver Selenium nao e thread-safe).
+_token_lock = threading.Lock()
 
 def carregar_progresso():
     if os.path.exists(PROGRESSO_FILE):
@@ -290,20 +300,31 @@ def _extrair_fone_de_texto(texto):
     return None
 
 def extrair_telefone_do_html(html):
-    # respostas curtas (< 5000 chars) são "sem resultado" — respostas longas têm JS do Kendo
-    # que contém palavras como "não contém", "não é igual" que disparariam falso positivo
-    if len(html) < 5000:
-        sem_kw = ['não retornou', 'nao retornou', 'sem resultado', 'nenhum registro',
-                  'nao foram encontrados', 'não foram encontrados']
-        if any(k in html.lower() for k in sem_kw):
-            return None
+    """Analisa a resposta da busca. Retorna (telefone|None, classificacao).
+
+    classificacao:
+      'encontrado'   -> achou telefone valido
+      'sem_resultado'-> ausencia confirmada (texto de "sem resultado" ou grade vazia)
+      'suspeito'     -> resposta anomala/incompleta (provavel throttle do Sigavi);
+                        deve ser retentada para nao virar falso "nao encontrado"
+    """
+    html_lower = html.lower()
+    tem_kw_sem_resultado = any(k in html_lower for k in (
+        'não retornou', 'nao retornou', 'sem resultado', 'nenhum registro',
+        'nao foram encontrados', 'não foram encontrados',
+    ))
+
+    # respostas curtas (< 5000 chars) só são "sem resultado" quando trazem a
+    # confirmação textual; sem ela, uma resposta curta é anômala (throttle)
+    if len(html) < 5000 and tem_kw_sem_resultado:
+        return None, 'sem_resultado'
 
     # 1) células marcadas como dados pessoais (telefone preenchido)
     dados_pessoais = re.findall(r'<td[^>]*data-dados-pessoais="true"[^>]*>([^<]*)</td>', html)
     for celula in dados_pessoais:
         tel = _extrair_fone_de_texto(celula)
         if tel:
-            return tel
+            return tel, 'encontrado'
 
     # 2) todas as <td> do tbody
     tbody = re.search(r'<tbody>(.*?)</tbody>', html, re.DOTALL)
@@ -311,13 +332,24 @@ def extrair_telefone_do_html(html):
         for celula in re.findall(r'<td[^>]*>([^<]*)</td>', tbody.group(1)):
             tel = _extrair_fone_de_texto(celula)
             if tel:
-                return tel
+                return tel, 'encontrado'
+        # veio a grade de resultados, mas sem telefone util -> ausencia real
+        return None, 'sem_resultado'
 
-    return None
+    # confirmacao textual de ausencia mesmo sem grade
+    if tem_kw_sem_resultado:
+        return None, 'sem_resultado'
+
+    # sem grade e sem confirmacao textual -> resposta anomala (provavel throttle)
+    return None, 'suspeito'
 
 def buscar_telefone_por_email(session, csrf_token, email):
-    global ULTIMO_ERRO_CONSULTA, req_csrf_token
-    ULTIMO_ERRO_CONSULTA = None
+    """Busca o telefone de um lead pelo email. Retorna (telefone|None, erro|None).
+
+    Seguro para uso em paralelo: a renovacao de sessao expirada acontece sob
+    _token_lock, ja que mexe nos cookies do driver Selenium (nao thread-safe).
+    """
+    global req_csrf_token
     payload = {
         'FacBusca': 'true',
         '__RequestVerificationToken': csrf_token,
@@ -346,46 +378,64 @@ def buscar_telefone_por_email(session, csrf_token, email):
         'IncluirHistoricoEmpreendimento': 'false', 'CentralAtendimentoHistorico': 'false',
         'X-Requested-With': 'XMLHttpRequest',
     }
-    try:
-        resp = session.post(
-            f"{BASE_URL}/CRM/Fac/Busca",
-            data=payload,
-            headers={'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'Accept': '*/*'},
-            timeout=30,
-        )
-        if resp.status_code == 200:
-            # sessão expirada → servidor retorna página de login
-            if 'ReturnUrl' in resp.url or 'Login' in resp.url or 'login' in resp.text[:500].lower():
-                print(f"  [!] sessão expirada — renovando cookies...")
-                for cookie in driver.get_cookies():
-                    session.cookies.set(cookie['name'], cookie['value'])
-                novo_token = obter_csrf_token(session)
-                if novo_token:
-                    req_csrf_token = novo_token
-                else:
-                    ULTIMO_ERRO_CONSULTA = 'Sessao expirada e CSRF token nao foi renovado.'
-                resp = session.post(
-                    f"{BASE_URL}/CRM/Fac/Busca",
-                    data={**payload, '__RequestVerificationToken': req_csrf_token},
-                    headers={'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'Accept': '*/*'},
-                    timeout=30,
-                )
-                if 'ReturnUrl' in resp.url or 'Login' in resp.url or 'login' in resp.text[:500].lower():
-                    ULTIMO_ERRO_CONSULTA = 'Sessao expirada mesmo apos renovar cookies.'
-                    print(f"  [!] sessao ainda expirada apos renovar cookies")
-                    return None
-            tel = extrair_telefone_do_html(resp.text)
-            if tel:
-                print(f"  [✓] {tel}")
+    def _sessao_expirada(r):
+        return 'ReturnUrl' in r.url or 'Login' in r.url or 'login' in r.text[:500].lower()
+
+    headers = {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'Accept': '*/*'}
+    ultimo_erro = None
+
+    # Retentamos respostas suspeitas/erros: o Sigavi devolve respostas vazias
+    # quando esta sob carga, e isso nao pode virar falso "nao encontrado".
+    for tentativa in range(1, CONSULTA_TENTATIVAS + 1):
+        try:
+            token_atual = req_csrf_token or csrf_token
+            resp = session.post(
+                f"{BASE_URL}/CRM/Fac/Busca",
+                data={**payload, '__RequestVerificationToken': token_atual},
+                headers=headers,
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                # sessão expirada → servidor retorna página de login
+                if _sessao_expirada(resp):
+                    # renova sob lock: driver.get_cookies() nao e thread-safe
+                    with _token_lock:
+                        for cookie in driver.get_cookies():
+                            session.cookies.set(cookie['name'], cookie['value'])
+                        novo_token = obter_csrf_token(session)
+                        if novo_token:
+                            req_csrf_token = novo_token
+                    token_atual = req_csrf_token
+                    if not token_atual:
+                        ultimo_erro = 'Sessao expirada e CSRF token nao foi renovado.'
+                        time.sleep(CONSULTA_BACKOFF * tentativa)
+                        continue
+                    resp = session.post(
+                        f"{BASE_URL}/CRM/Fac/Busca",
+                        data={**payload, '__RequestVerificationToken': token_atual},
+                        headers=headers,
+                        timeout=30,
+                    )
+                    if _sessao_expirada(resp):
+                        ultimo_erro = 'Sessao expirada mesmo apos renovar cookies.'
+                        time.sleep(CONSULTA_BACKOFF * tentativa)
+                        continue
+
+                tel, classificacao = extrair_telefone_do_html(resp.text)
+                if classificacao == 'encontrado':
+                    return tel, None
+                if classificacao == 'sem_resultado':
+                    return None, None  # ausencia confiavel
+                # 'suspeito' -> provavel throttle; espera e tenta de novo
+                ultimo_erro = f'Resposta suspeita ({len(resp.text)} chars) - possivel limite do Sigavi.'
             else:
-                print(f"  [✗] não encontrado ({len(resp.text)} chars)")
-            return tel
-        print(f"  [✗] status {resp.status_code}")
-        ULTIMO_ERRO_CONSULTA = f'Status HTTP inesperado: {resp.status_code}'
-    except Exception as e:
-        print(f"  → Erro ao buscar email {email}: {e}")
-        ULTIMO_ERRO_CONSULTA = str(e)
-    return None
+                ultimo_erro = f'Status HTTP inesperado: {resp.status_code}'
+        except Exception as e:
+            ultimo_erro = str(e)
+
+        time.sleep(CONSULTA_BACKOFF * tentativa)
+
+    return None, ultimo_erro
 
 def normalizar_texto(valor: str) -> str:
     if valor is None:
@@ -513,17 +563,6 @@ else:
 # =========================
 _ultimo_index, resultados_email, resultados_cadastro = carregar_progresso()
 
-# pré-calcula quantas linhas não têm telefone (para o contador)
-if _email_col:
-    if 'FONE2' in df.columns:
-        _sem_fone = df['FONE2'].isna() | (df['FONE2'].astype(str).str.replace(r'\D', '', regex=True).str.len() < 11)
-    else:
-        _sem_fone = pd.Series([True] * len(df))
-    _total_emails = int((df[_email_col].notna() & _sem_fone).sum())
-else:
-    _total_emails = 0
-_email_count = 0
-
 if MODE == 'consulta':
     print("Modo selecionado: somente consulta.")
 else:
@@ -604,78 +643,126 @@ def salvar_estado(ultimo_index, anunciar=False):
     _salvar_excel_resultado(anunciar=anunciar)
 
 
+def emitir_progresso():
+    """Emite uma linha estruturada com os contadores REAIS da execucao.
+
+    A interface le essa linha (prefixo PROGRESS=) para mostrar os numeros e a
+    barra de progresso. Nao depende dos logs visiveis, entao nao 'esquece'
+    sucessos antigos quando o buffer de log rotaciona.
+    """
+    total = len(df)
+    if MODE == 'consulta':
+        sucessos = sum(1 for r in resultados_email if r['Status'] == 'encontrado')
+        pendentes_ct = sum(1 for r in resultados_email if r['Status'] == 'nao_encontrado')
+        erros = sum(1 for r in resultados_email if r['Status'] == 'erro_consulta')
+        processados = len(resultados_email)
+    else:
+        sucessos = sum(1 for r in resultados_cadastro if r['Status'] == 'cadastrado')
+        pendentes_ct = sum(
+            1 for r in resultados_cadastro
+            if r['Status'] in ('duplicado', 'nao_cadastrado')
+        )
+        erros = sum(1 for r in resultados_cadastro if r['Status'] == 'erro_cadastro')
+        processados = len(resultados_cadastro)
+
+    print("PROGRESS=" + json.dumps({
+        'processados': processados,
+        'total': total,
+        'sucessos': sucessos,
+        'pendentes': pendentes_ct,
+        'erros': erros,
+    }), flush=True)
+
+
+def _processar_linha_consulta(index, row):
+    """Resolve o telefone de uma unica linha (sem efeitos colaterais de estado).
+
+    Roda em paralelo dentro do ThreadPoolExecutor: faz a busca HTTP quando
+    necessario e devolve o dict pronto para a planilha de resultado.
+    """
+    nome = str(row.get('NOME') or '').strip()
+    email_raw = str(row.get(_email_col) or '').strip() if _email_col else ''
+    telefone = re.sub(r'\D', '', str(row.get('FONE2') or ''))
+
+    def _resultado(status, telefone_final, detalhe):
+        return {
+            'Linha': index + 1,
+            'Nome': nome,
+            'Email': email_raw,
+            'Telefone': telefone_final,
+            'Status': status,
+            'Detalhe': detalhe,
+        }
+
+    if not email_raw:
+        return _resultado('erro_consulta', '', 'Email ausente na planilha.')
+    if len(telefone) >= 11:
+        return _resultado('encontrado', telefone, 'Telefone ja estava na planilha.')
+    if not (req_session and req_csrf_token):
+        return _resultado('erro_consulta', '', 'Sessao de consulta indisponivel.')
+
+    tel, erro = buscar_telefone_por_email(req_session, req_csrf_token, email_raw)
+    tel = tel or ''
+    if len(tel) >= 10:
+        return _resultado('encontrado', tel, 'Telefone encontrado por email.')
+    if erro:
+        return _resultado('erro_consulta', '', erro)
+    return _resultado('nao_encontrado', '', 'Telefone nao encontrado por email.')
+
+
 if MODE == 'consulta':
     ultimo_processado = _ultimo_index
-    try:
-        for index, row in df.iterrows():
-            if index <= _ultimo_index:
-                continue
+    pendentes = [(index, row) for index, row in df.iterrows() if index > _ultimo_index]
+    # blocos: paraleliza a rede dentro do bloco e faz checkpoint ao fim de cada um
+    bloco_tam = max(AUTOSAVE_EVERY, CONSULTA_WORKERS)
+    total_pendentes = len(pendentes)
+    processados = 0
+    marcas = {'encontrado': '✓', 'nao_encontrado': '✗', 'erro_consulta': '!'}
+    print(f"Consulta paralela: {total_pendentes} linha(s) a processar, {CONSULTA_WORKERS} em paralelo.")
+    emitir_progresso()
 
+    try:
+        for inicio in range(0, total_pendentes, bloco_tam):
             if parada_solicitada():
                 print("\nParada solicitada pela interface. Salvando resultados...")
                 salvar_estado(ultimo_processado, anunciar=True)
+                emitir_progresso()
                 driver.quit()
                 raise SystemExit(0)
 
-            nome = str(row.get('NOME') or '').strip()
-            email_raw = ''
-            if _email_col:
-                email_raw = str(row.get(_email_col) or '').strip()
+            bloco = pendentes[inicio:inicio + bloco_tam]
+            resultados_bloco = {}
+            with ThreadPoolExecutor(max_workers=CONSULTA_WORKERS) as executor:
+                futuros = {
+                    executor.submit(_processar_linha_consulta, index, row): index
+                    for index, row in bloco
+                }
+                for futuro in as_completed(futuros):
+                    resultados_bloco[futuros[futuro]] = futuro.result()
 
-            telefone_raw = str(row.get('FONE2') or '')
-            telefone = re.sub(r'\D', '', telefone_raw)
+            # consolida na ordem original do bloco (resultado estavel e retomavel)
+            for index, _row in bloco:
+                resultado = resultados_bloco[index]
+                resultados_email.append(resultado)
+                processados += 1
+                marca = marcas.get(resultado['Status'], '?')
+                print(f"[{processados}/{total_pendentes}] linha {resultado['Linha']} "
+                      f"{resultado['Email']} [{marca}] {resultado['Telefone']}")
+                ultimo_processado = index
 
-            detalhe = ''
-            status = 'nao_encontrado'
-
-            if not email_raw:
-                status = 'erro_consulta'
-                detalhe = 'Email ausente na planilha.'
-                print(f"[Linha {index + 1}] email ausente")
-            elif len(telefone) >= 11:
-                status = 'encontrado'
-                detalhe = 'Telefone ja estava na planilha.'
-                print(f"[Linha {index + 1}] {email_raw}")
-                print(f"  [✓] {telefone} (planilha)")
-            elif req_session and req_csrf_token:
-                _email_count += 1
-                print(f"[Email {_email_count}/{_total_emails}] {email_raw}")
-                telefone = buscar_telefone_por_email(req_session, req_csrf_token, email_raw) or ''
-                if len(telefone) >= 10:
-                    status = 'encontrado'
-                    detalhe = 'Telefone encontrado por email.'
-                elif ULTIMO_ERRO_CONSULTA:
-                    status = 'erro_consulta'
-                    detalhe = ULTIMO_ERRO_CONSULTA
-                else:
-                    status = 'nao_encontrado'
-                    detalhe = 'Telefone nao encontrado por email.'
-            else:
-                status = 'erro_consulta'
-                detalhe = 'Sessao de consulta indisponivel.'
-
-            resultados_email.append({
-                'Linha': index + 1,
-                'Nome': nome,
-                'Email': email_raw,
-                'Telefone': telefone if status == 'encontrado' else '',
-                'Status': status,
-                'Detalhe': detalhe,
-            })
-
-            ultimo_processado = index
-            salvar_progresso(ultimo_processado, resultados_email, resultados_cadastro)
-            if len(resultados_email) % AUTOSAVE_EVERY == 0:
-                _salvar_excel_resultado()
+            salvar_estado(ultimo_processado)
+            emitir_progresso()
 
         print("Consulta concluida!")
         salvar_estado(ultimo_processado, anunciar=True)
+        emitir_progresso()
         driver.quit()
         raise SystemExit(0)
 
     except KeyboardInterrupt:
         print("\n\nPausado pelo usuario. Salvando resultados...")
         salvar_estado(ultimo_processado, anunciar=True)
+        emitir_progresso()
         driver.quit()
         raise SystemExit(0)
 
@@ -686,9 +773,11 @@ try:
         if parada_solicitada():
             print("\nParada solicitada pela interface. Salvando resultados...")
             salvar_estado(index - 1, anunciar=True)
+            emitir_progresso()
             driver.quit()
             raise SystemExit(0)
 
+        emitir_progresso()
         nome = str(row.get('NOME') or '').strip()
         email_raw = ''
         if _email_col:
@@ -973,10 +1062,12 @@ except KeyboardInterrupt:
     print("\n\nPausado pelo usuário. Salvando resultados...")
     ultimo_seguro = locals().get('index', _ultimo_index)
     salvar_estado(ultimo_seguro, anunciar=True)
+    emitir_progresso()
     driver.quit()
     raise SystemExit(0)
 
 print("Processamento concluído!")
 driver.quit()
 salvar_estado(len(df) - 1, anunciar=True)
+emitir_progresso()
 
