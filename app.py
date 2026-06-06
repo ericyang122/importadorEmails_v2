@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.utils import secure_filename
 
+import whatsapp
+
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_ROOT = BASE_DIR / "uploads"
@@ -174,6 +176,59 @@ def register_result_files(job_id, result_dir):
         job["result_files"] = entries
 
 
+def _formatar_duracao(started_at, finished_at):
+    try:
+        segundos = int((datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)).total_seconds())
+    except (TypeError, ValueError):
+        return "tempo desconhecido"
+    segundos = max(0, segundos)
+    horas, resto = divmod(segundos, 3600)
+    minutos, seg = divmod(resto, 60)
+    if horas:
+        return f"{horas}h{minutos:02d}min"
+    if minutos:
+        return f"{minutos}min{seg:02d}s"
+    return f"{seg}s"
+
+
+def montar_resumo(job):
+    progress = job.get("progress") or {}
+    is_consulta = job.get("mode") == "consulta"
+    titulo = {
+        "completed": "✅ Automação concluída",
+        "stopped": "⏸️ Automação parada (resultados salvos)",
+        "failed": "❌ Automação finalizada com erro",
+    }.get(job.get("status"), "Automação finalizada")
+    rotulo_sucesso = "telefones encontrados" if is_consulta else "cadastrados"
+    rotulo_pendente = "não encontrados" if is_consulta else "duplicados/não cadastrados"
+
+    return (
+        f"{titulo}\n"
+        f"📄 {job.get('filename', '')}\n"
+        f"⚙️ Modo: {'Consulta' if is_consulta else 'Cadastro'}\n"
+        f"⏱️ Duração: {_formatar_duracao(job.get('started_at'), job.get('finished_at'))}\n"
+        f"📊 Processados: {progress.get('processados', 0)}/{progress.get('total', 0)}\n\n"
+        f"✅ {progress.get('sucessos', 0)} {rotulo_sucesso}\n"
+        f"➖ {progress.get('pendentes', 0)} {rotulo_pendente}\n"
+        f"⚠️ {progress.get('erros', 0)} erros"
+    )
+
+
+def notificar_whatsapp(job_id, result_dir):
+    """Envia o resumo + planilhas pelo WhatsApp ao fim do job (se configurado)."""
+    if not whatsapp.configurado():
+        return
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        snapshot = dict(job) if job else None
+    if not snapshot or snapshot.get("status") not in {"completed", "stopped", "failed"}:
+        return
+    texto = montar_resumo(snapshot)
+    arquivos = [entry["path"] for entry in result_file_entries(result_dir)]
+    ok, msg = whatsapp.notificar(texto, arquivos)
+    append_log(job_id, f"\n{msg}\n")
+
+
 def run_automation(job_id, excel_path, result_dir, progress_file, stop_file, log_path, mode, sigavi_login, sigavi_senha, headless):
     secrets_to_hide = [sigavi_login, sigavi_senha]
     command = [
@@ -255,6 +310,7 @@ def run_automation(job_id, excel_path, result_dir, progress_file, stop_file, log
             finished_at=datetime.now().isoformat(timespec="seconds"),
         )
     finally:
+        notificar_whatsapp(job_id, result_dir)
         try:
             excel_path.unlink(missing_ok=True)
         except OSError:

@@ -172,3 +172,40 @@ Para escolher arquivo de progresso e parada segura:
 ```bash
 python confio.py --mode consulta --excel ./abertos/abertos_cora.xlsx --progress-file ./backups/teste/progresso.json --stop-file ./backups/teste/parar.flag
 ```
+
+---
+
+## Ajustes de desempenho (`.env`)
+
+A consulta por email roda em paralelo e o cadastro tem velocidade calibravel:
+
+```env
+SIGAVI_CONSULTA_WORKERS=8       # buscas de email simultaneas (baixe se houver throttle)
+SIGAVI_CONSULTA_TENTATIVAS=3    # retentativas em resposta suspeita do Sigavi
+SIGAVI_CONSULTA_BACKOFF=1.5     # pausa base (s) entre retentativas
+SIGAVI_CADASTRO_DELAY=1.0       # fator de velocidade do cadastro (0.6 = mais rapido)
+```
+
+`SIGAVI_CADASTRO_DELAY` multiplica todas as pausas do cadastro. Calibre com a tela
+visivel e uma planilha pequena: 1.0 e o padrao seguro; abaixe ate o ponto que ainda
+cadastra corretamente.
+
+---
+
+## Notificacao por WhatsApp (Evolution API)
+
+Ao terminar uma execucao, o sistema pode enviar um resumo + as planilhas de
+resultado por WhatsApp. E **opcional**: sem configuracao, nada e enviado.
+
+Para ativar, preencha no `.env`:
+
+```env
+EVOLUTION_API_URL=https://sua-evolution.com   # URL base da Evolution API
+EVOLUTION_API_KEY=sua_api_key                 # apikey da instancia
+EVOLUTION_INSTANCE=nome_da_instancia          # instancia conectada ao WhatsApp
+WHATSAPP_DESTINO=5511999998888                # numero que recebe (com DDI, sem +)
+```
+
+O resumo inclui modo, duracao, processados e os contadores (encontrados/cadastrados,
+nao encontrados/duplicados e erros), seguido das planilhas `.xlsx` em anexo.
+Compativel com Evolution API v2 (`/message/sendText` e `/message/sendMedia`).
