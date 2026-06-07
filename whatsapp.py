@@ -14,33 +14,47 @@ Compativel com Evolution API v2 (endpoints /message/sendText e /message/sendMedi
 
 import base64
 import os
+import time
 from pathlib import Path
 
 import requests
 
 
-EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "").rstrip("/")
-EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "")
-EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "")
-WHATSAPP_DESTINO = os.getenv("WHATSAPP_DESTINO", "")
-
 XLSX_MIMETYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+# As variaveis sao lidas a cada chamada (e nao no import do modulo) de proposito:
+# assim funciona mesmo que este modulo seja importado antes do load_dotenv().
+def _url():
+    return os.getenv("EVOLUTION_API_URL", "").rstrip("/")
+
+
+def _key():
+    return os.getenv("EVOLUTION_API_KEY", "")
+
+
+def _instance():
+    return os.getenv("EVOLUTION_INSTANCE", "")
+
+
+def _destino():
+    return os.getenv("WHATSAPP_DESTINO", "")
 
 
 def configurado():
     """True se todas as credenciais necessarias estao no ambiente."""
-    return all([EVOLUTION_API_URL, EVOLUTION_API_KEY, EVOLUTION_INSTANCE, WHATSAPP_DESTINO])
+    return all([_url(), _key(), _instance(), _destino()])
 
 
 def _headers():
-    return {"apikey": EVOLUTION_API_KEY, "Content-Type": "application/json"}
+    return {"apikey": _key(), "Content-Type": "application/json"}
 
 
 def enviar_texto(texto):
-    url = f"{EVOLUTION_API_URL}/message/sendText/{EVOLUTION_INSTANCE}"
+    url = f"{_url()}/message/sendText/{_instance()}"
     resp = requests.post(
         url,
-        json={"number": WHATSAPP_DESTINO, "text": texto},
+        json={"number": _destino(), "text": texto},
         headers=_headers(),
         timeout=30,
     )
@@ -50,9 +64,9 @@ def enviar_texto(texto):
 def enviar_arquivo(caminho, legenda=""):
     caminho = Path(caminho)
     conteudo_b64 = base64.b64encode(caminho.read_bytes()).decode("ascii")
-    url = f"{EVOLUTION_API_URL}/message/sendMedia/{EVOLUTION_INSTANCE}"
+    url = f"{_url()}/message/sendMedia/{_instance()}"
     payload = {
-        "number": WHATSAPP_DESTINO,
+        "number": _destino(),
         "mediatype": "document",
         "fileName": caminho.name,
         "media": conteudo_b64,
@@ -72,11 +86,28 @@ def notificar(texto, arquivos=None):
     """
     if not configurado():
         return False, "WhatsApp nao configurado (.env) — notificacao ignorada."
+
     try:
         enviar_texto(texto)
-        for arq in (arquivos or []):
-            if Path(arq).exists() and Path(arq).stat().st_size > 0:
-                enviar_arquivo(arq)
-        return True, "Resumo enviado pelo WhatsApp."
     except Exception as exc:
-        return False, f"Falha ao enviar WhatsApp: {exc}"
+        return False, f"Falha ao enviar o resumo pelo WhatsApp: {exc}"
+
+    # Envia cada anexo de forma independente: se um falhar, os demais ainda vao.
+    # Uma pausa curta entre envios evita throttle do Baileys ao mandar varios.
+    candidatos = [a for a in (arquivos or []) if Path(a).exists() and Path(a).stat().st_size > 0]
+    enviados = 0
+    falhas = []
+    for arq in candidatos:
+        try:
+            enviar_arquivo(arq)
+            enviados += 1
+            time.sleep(1.5)
+        except Exception as exc:
+            falhas.append(f"{Path(arq).name} ({exc})")
+
+    if not falhas:
+        return True, f"Resumo + {enviados} planilha(s) enviados pelo WhatsApp."
+    return False, (
+        f"Resumo enviado; {enviados} de {len(candidatos)} planilha(s) foram. "
+        f"Falharam: {'; '.join(falhas)}"
+    )

@@ -37,11 +37,12 @@
       </div>
       <form method="post" action="{{ url_for('logout') }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button class="ghost-button" type="submit">Sair</button>
+        <button class="ghost-button" type="submit">↩ Sair</button>
       </form>
     </header>
 
     <section class="workspace">
+      <!-- ===================== COLUNA ESQUERDA: FORMULÁRIO ===================== -->
       <form id="run-form" class="panel" enctype="multipart/form-data">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
@@ -51,86 +52,192 @@
         </div>
 
         <fieldset class="mode-group">
-          <legend>Tipo de execução</legend>
+          <legend>O que você quer fazer?</legend>
           <label class="mode-card">
             <input type="radio" name="mode" value="consulta" checked>
             <span>
-              <strong>Somente consulta</strong>
-              <small>Busca telefones por email e gera relatórios. Não cadastra nada no Sigavi.</small>
+              <strong>🔍 Buscar telefones</strong>
+              <small>Acha o telefone de cada e-mail no Sigavi e gera um relatório. Não cadastra nada.</small>
             </span>
           </label>
           <label class="mode-card">
             <input type="radio" name="mode" value="cadastro">
             <span>
-              <strong>Somente cadastro</strong>
-              <small>Usa telefones já existentes na planilha para cadastrar leads no Sigavi.</small>
+              <strong>📥 Cadastrar leads</strong>
+              <small>Usa os telefones que já estão na planilha para cadastrar os leads no Sigavi.</small>
             </span>
           </label>
         </fieldset>
 
         <label>
-          Login Sigavi
-          <input type="email" name="sigavi_login" autocomplete="username" required>
+          Login do Sigavi
+          <input type="email" name="sigavi_login" autocomplete="username" placeholder="seu.email@abyara.com.br" required>
         </label>
 
         <label>
-          Senha Sigavi
+          Senha do Sigavi
           <input type="password" name="sigavi_senha" autocomplete="current-password" required>
         </label>
 
-        <label>
-          Planilha Excel
-          <input type="file" name="planilha" accept=".xlsx" required>
-        </label>
+        <!-- Upload bonito (o input real fica escondido) -->
+        <div class="field-block">
+          <span class="field-label">Planilha (Excel)</span>
+          <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Selecionar planilha">
+            <input id="file-input" type="file" name="planilha" accept=".xlsx,.xls" hidden required>
+            <div id="dropzone-empty" class="dropzone-empty">
+              <span class="dropzone-icon">📄</span>
+              <strong>Clique para selecionar</strong>
+              <small>ou arraste a planilha aqui — formato .xlsx</small>
+            </div>
+            <div id="dropzone-file" class="dropzone-file hidden">
+              <span class="dropzone-icon">✅</span>
+              <div class="dropzone-file-info">
+                <strong id="file-name">arquivo.xlsx</strong>
+                <small id="file-size">—</small>
+              </div>
+              <button type="button" id="file-clear" class="mini-button" aria-label="Remover arquivo">✕</button>
+            </div>
+          </div>
+          <p id="file-message" class="field-hint"></p>
+        </div>
 
         <label class="checkbox-row">
           <input type="checkbox" name="headless" checked>
-          Rodar navegador oculto
+          Rodar o navegador em segundo plano (recomendado)
         </label>
 
         <div class="action-row">
-          <button id="submit-button" type="submit">Executar automação</button>
-          <button id="stop-button" class="danger-button" type="button" disabled>Parar e salvar</button>
+          <button id="submit-button" type="submit" disabled>▶ Executar automação</button>
+          <button id="stop-button" class="danger-button" type="button" disabled>⏸ Parar e salvar</button>
+          <button id="clear-button" class="ghost-button" type="button">🧹 Limpar tela</button>
         </div>
       </form>
 
-      <section class="panel log-panel">
+      <!-- ===================== COLUNA DIREITA: ACOMPANHAMENTO ===================== -->
+      <section class="panel status-panel">
         <div class="panel-header">
-          <h2>Status</h2>
-          <span id="job-id">Sem execução</span>
+          <h2>Acompanhamento</h2>
+          <span id="job-id" class="muted-pill">Sem execução</span>
         </div>
-        <div class="metrics-grid">
-          <div>
-            <strong id="metric-processed">0</strong>
-            <span>Processados</span>
+
+        <!-- Resumo da execução -->
+        <div class="summary-grid">
+          <div class="summary-item">
+            <span class="summary-label">Modo</span>
+            <strong id="sum-mode">Buscar telefones</strong>
           </div>
-          <div>
-            <strong id="metric-success">0</strong>
-            <span>Sucessos</span>
+          <div class="summary-item">
+            <span class="summary-label">Planilha</span>
+            <strong id="sum-file">—</strong>
           </div>
-          <div>
-            <strong id="metric-pending">0</strong>
-            <span>Pendentes</span>
+          <div class="summary-item">
+            <span class="summary-label">Linhas detectadas</span>
+            <strong id="sum-total">—</strong>
           </div>
-          <div>
-            <strong id="metric-errors">0</strong>
-            <span>Erros</span>
+          <div class="summary-item">
+            <span class="summary-label">Leads válidos</span>
+            <strong id="sum-valid" class="text-success">—</strong>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">Leads ignorados</span>
+            <strong id="sum-ignored" class="text-muted">—</strong>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">Situação</span>
+            <strong id="sum-status">Aguardando</strong>
           </div>
         </div>
-        <div class="progress-wrap">
+
+        <!-- Prévia da planilha -->
+        <div id="preview-block" class="preview-block hidden">
+          <div class="preview-head">
+            <span class="section-title">👀 Prévia da planilha</span>
+            <small class="muted">primeiras linhas</small>
+          </div>
+          <div id="preview-warning" class="inline-warning hidden"></div>
+          <div class="table-scroll">
+            <table id="preview-table" class="preview-table"></table>
+          </div>
+        </div>
+
+        <!-- Progresso -->
+        <div class="progress-block">
+          <div class="progress-top">
+            <span class="progress-caption">Progresso</span>
+            <span id="progress-percent" class="progress-percent">0%</span>
+          </div>
           <div class="progress-track">
             <div id="progress-bar" class="progress-fill"></div>
           </div>
-          <span id="progress-label" class="progress-label"></span>
+          <div class="progress-meta">
+            <span id="progress-label" class="progress-label">Aguardando início</span>
+            <span id="progress-time" class="progress-time"></span>
+          </div>
         </div>
-        <pre id="log-output">Aguardando planilha.</pre>
-        <div id="download-card" class="download-card hidden">
-          <div>
-            <strong>Resultados prontos</strong>
-            <span>Baixe os arquivos antes de iniciar outra execução.</span>
+
+        <!-- Cards de status -->
+        <div class="metrics-grid">
+          <div class="metric">
+            <span class="metric-icon">📋</span>
+            <strong id="metric-processed">0</strong>
+            <span class="metric-name">Processados</span>
+          </div>
+          <div class="metric metric-success">
+            <span class="metric-icon">✅</span>
+            <strong id="metric-success">0</strong>
+            <span id="metric-success-name" class="metric-name">Sucessos</span>
+          </div>
+          <div class="metric metric-pending">
+            <span class="metric-icon">➖</span>
+            <strong id="metric-pending">0</strong>
+            <span id="metric-pending-name" class="metric-name">Pendentes</span>
+          </div>
+          <div class="metric metric-errors">
+            <span class="metric-icon">⚠️</span>
+            <strong id="metric-errors">0</strong>
+            <span class="metric-name">Erros</span>
+          </div>
+          <div class="metric metric-ignored">
+            <span class="metric-icon">🚫</span>
+            <strong id="metric-ignored">0</strong>
+            <span class="metric-name">Ignorados</span>
+          </div>
+        </div>
+
+        <!-- Painel de resultado final -->
+        <div id="result-panel" class="result-panel hidden">
+          <div class="result-headline">
+            <span id="result-icon" class="result-icon">🎉</span>
+            <div>
+              <strong id="result-title">Execução concluída</strong>
+              <span id="result-subtitle" class="muted"></span>
+            </div>
+          </div>
+          <div class="result-numbers">
+            <div><strong id="result-total">0</strong><span>Processados</span></div>
+            <div><strong id="result-success" class="text-success">0</strong><span>Sucessos</span></div>
+            <div><strong id="result-pending" class="text-muted">0</strong><span>Pendentes</span></div>
+            <div><strong id="result-errors" class="text-danger">0</strong><span>Erros</span></div>
           </div>
           <div id="download-list" class="download-list"></div>
         </div>
+
+        <!-- Últimas ações (amigável) -->
+        <div class="actions-block">
+          <span class="section-title">📰 Últimas ações</span>
+          <ul id="actions-feed" class="actions-feed">
+            <li class="action-empty">As ações aparecem aqui durante a execução.</li>
+          </ul>
+        </div>
+
+        <!-- Log técnico (escondido) -->
+        <details class="log-details">
+          <summary>
+            <span class="log-summary-label">🔧 Detalhes técnicos</span>
+            <span class="log-summary-hint">log completo</span>
+          </summary>
+          <pre id="log-output">Aguardando planilha.</pre>
+        </details>
       </section>
     </section>
   </main>

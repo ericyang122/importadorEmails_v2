@@ -1,5 +1,7 @@
+import io
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -35,6 +37,22 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
 )
+# Recarrega templates e nao deixa o navegador cachear CSS/JS durante o uso:
+# evita o descompasso "HTML velho + CSS novo" ao atualizar a interface.
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+
+# Mesma normalizacao de colunas usada no confio.py, para a previa bater com a execucao.
+COLUNAS_RENOMEAR = {
+    "CORRETOR ORIGEM": "CORRETOR DE ORIGEM",
+    "TELEFONE": "FONE2",
+    "NOME COMPLETO": "NOME",
+    "nome_cliente": "NOME",
+    "celular": "FONE2",
+    "corretor": "CORRETOR DE ORIGEM",
+    "origem": "TIPO PLANTAO",
+    "gerente": "GERENTE",
+}
 
 APP_PASSWORD_CONFIGURED = bool(os.getenv("APP_PASSWORD"))
 APP_PASSWORD = os.getenv("APP_PASSWORD", "marketing123")
@@ -191,27 +209,50 @@ def _formatar_duracao(started_at, finished_at):
     return f"{seg}s"
 
 
-def montar_resumo(job):
+def montar_resumo(job, n_anexos=0):
     progress = job.get("progress") or {}
     is_consulta = job.get("mode") == "consulta"
     titulo = {
-        "completed": "✅ Automação concluída",
-        "stopped": "⏸️ Automação parada (resultados salvos)",
-        "failed": "❌ Automação finalizada com erro",
-    }.get(job.get("status"), "Automação finalizada")
-    rotulo_sucesso = "telefones encontrados" if is_consulta else "cadastrados"
+        "completed": "✅ *Automação concluída*",
+        "stopped": "⏸️ *Automação parada* (resultados salvos)",
+        "failed": "❌ *Automação finalizada com erro*",
+    }.get(job.get("status"), "*Automação finalizada*")
+    rotulo_sucesso = "telefones encontrados" if is_consulta else "leads cadastrados"
     rotulo_pendente = "não encontrados" if is_consulta else "duplicados/não cadastrados"
 
-    return (
-        f"{titulo}\n"
-        f"📄 {job.get('filename', '')}\n"
-        f"⚙️ Modo: {'Consulta' if is_consulta else 'Cadastro'}\n"
-        f"⏱️ Duração: {_formatar_duracao(job.get('started_at'), job.get('finished_at'))}\n"
-        f"📊 Processados: {progress.get('processados', 0)}/{progress.get('total', 0)}\n\n"
-        f"✅ {progress.get('sucessos', 0)} {rotulo_sucesso}\n"
-        f"➖ {progress.get('pendentes', 0)} {rotulo_pendente}\n"
-        f"⚠️ {progress.get('erros', 0)} erros"
-    )
+    total = progress.get("total", 0) or 0
+    processados = progress.get("processados", 0) or 0
+    sucessos = progress.get("sucessos", 0) or 0
+    pendentes = progress.get("pendentes", 0) or 0
+    erros = progress.get("erros", 0) or 0
+    base = processados or total
+    taxa = round((sucessos / base) * 100) if base else 0
+
+    try:
+        hora = datetime.fromisoformat(job.get("finished_at")).strftime("%H:%M")
+    except (TypeError, ValueError):
+        hora = ""
+
+    linha = "━━━━━━━━━━━━━━━"
+    partes = [
+        titulo,
+        linha,
+        f"📄 {job.get('filename', '')}",
+        f"⚙️ {'Consulta' if is_consulta else 'Cadastro'}   ·   ⏱️ {_formatar_duracao(job.get('started_at'), job.get('finished_at'))}",
+        f"📊 {processados}/{total} processados",
+        "",
+        "*Resultado*",
+        f"✅ {sucessos} {rotulo_sucesso}",
+        f"➖ {pendentes} {rotulo_pendente}",
+        f"⚠️ {erros} erro(s)",
+        linha,
+        f"🎯 Taxa de sucesso: *{taxa}%*",
+    ]
+    if n_anexos:
+        partes.append(f"📎 {n_anexos} planilha(s) em anexo")
+    if hora:
+        partes.append(f"🕐 Concluído às {hora}")
+    return "\n".join(partes)
 
 
 def notificar_whatsapp(job_id, result_dir):
@@ -223,8 +264,9 @@ def notificar_whatsapp(job_id, result_dir):
         snapshot = dict(job) if job else None
     if not snapshot or snapshot.get("status") not in {"completed", "stopped", "failed"}:
         return
-    texto = montar_resumo(snapshot)
     arquivos = [entry["path"] for entry in result_file_entries(result_dir)]
+    anexaveis = [a for a in arquivos if Path(a).exists() and Path(a).stat().st_size > 0]
+    texto = montar_resumo(snapshot, n_anexos=len(anexaveis))
     ok, msg = whatsapp.notificar(texto, arquivos)
     append_log(job_id, f"\n{msg}\n")
 
@@ -515,6 +557,77 @@ def download_result(job_id):
 @login_required
 def download_result_file(job_id, file_id):
     return _serve_result_file(job_id, file_id)
+
+
+@app.post("/preview")
+@login_required
+def preview_planilha():
+    """Le a planilha enviada e devolve uma previa + contagens (sem executar nada).
+
+    Espelha a leitura do confio.py (primeira aba + renomeacao de colunas) para que
+    o total/validos/ignorados mostrados na tela batam com o que a automacao vai usar.
+    """
+    if not check_csrf():
+        return jsonify({"error": "Sessao expirada. Atualize a pagina."}), 400
+
+    upload = request.files.get("planilha")
+    if not upload or not upload.filename:
+        return jsonify({"error": "Nenhum arquivo enviado."}), 400
+    if Path(secure_filename(upload.filename)).suffix.lower() not in {".xlsx", ".xls"}:
+        return jsonify({"error": "Formato invalido. Use .xlsx ou .xls."}), 400
+
+    mode = request.form.get("mode", "consulta")
+    try:
+        import pandas as pd
+
+        excel = pd.ExcelFile(io.BytesIO(upload.read()))
+        sheet = excel.sheet_names[0]
+        df = excel.parse(sheet).rename(columns=COLUNAS_RENOMEAR)
+    except Exception as exc:  # planilha corrompida, vazia, etc.
+        return jsonify({"error": f"Nao foi possivel ler a planilha: {exc}"}), 400
+
+    total = int(len(df))
+    email_col = next((c for c in df.columns if re.match(r"e.?mail", str(c), re.IGNORECASE)), None)
+
+    def _digitos(valor):
+        return re.sub(r"\D", "", "" if valor is None else str(valor))
+
+    # "Valido" depende do modo: consulta precisa de email; cadastro precisa de telefone.
+    if mode == "consulta":
+        if email_col:
+            validos = int(df[email_col].apply(lambda v: str(v).strip().lower() not in ("", "nan")).sum())
+        else:
+            validos = 0
+    else:
+        validos = int(df["FONE2"].apply(lambda v: len(_digitos(v)) >= 11).sum()) if "FONE2" in df.columns else 0
+    ignorados = max(0, total - validos)
+
+    # Colunas amigaveis para a previa (so as que existirem na planilha).
+    empreend_col = next((c for c in df.columns if "EMPREEND" in str(c).upper()), None)
+    mapa_exibicao = [
+        ("Nome", "NOME"),
+        ("Email", email_col),
+        ("Telefone", "FONE2"),
+        ("Corretor", "CORRETOR DE ORIGEM"),
+        ("Empreendimento", empreend_col),
+    ]
+    presentes = [(rotulo, col) for rotulo, col in mapa_exibicao if col and col in df.columns]
+    faltando = [rotulo for rotulo, col in mapa_exibicao if not col or col not in df.columns]
+
+    linhas = []
+    for _, row in df.head(5).iterrows():
+        linhas.append({rotulo: ("" if pd.isna(row.get(col)) else str(row.get(col))) for rotulo, col in presentes})
+
+    return jsonify({
+        "sheet": str(sheet),
+        "total": total,
+        "validos": validos,
+        "ignorados": ignorados,
+        "colunas": [rotulo for rotulo, _ in presentes],
+        "rows": linhas,
+        "faltando": faltando,
+        "mode": mode,
+    })
 
 
 @app.get("/health")
