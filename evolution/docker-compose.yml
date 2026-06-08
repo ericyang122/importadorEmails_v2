@@ -1,0 +1,62 @@
+version: "3.9"
+
+# Evolution API v2 + PostgreSQL + Redis — pronto para rodar local ou na VM.
+# Suba com:  docker compose up -d   (dentro desta pasta)
+# Painel/API: http://localhost:8080
+
+services:
+  evolution-api:
+    container_name: evolution_api
+    image: atendai/evolution-api:v2.1.1
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      - SERVER_URL=http://localhost:8080
+      # Chave da API — definida no arquivo .env desta pasta (ver .env.example). É a mesma usada em EVOLUTION_API_KEY no .env do importador.
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY}
+      - AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES=true
+      # Versão do WhatsApp Web (a embutida na imagem v2.1.1 ficou velha e o WhatsApp recusava a conexão)
+      - CONFIG_SESSION_PHONE_VERSION=2.3000.1035194821
+      - DATABASE_ENABLED=true
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://evolution:${POSTGRES_PASSWORD}@postgres:5432/evolution?schema=public
+      - DATABASE_CONNECTION_CLIENT_NAME=evolution
+      - DATABASE_SAVE_DATA_INSTANCE=true
+      - DATABASE_SAVE_DATA_NEW_MESSAGE=true
+      - DATABASE_SAVE_MESSAGE_UPDATE=true
+      - DATABASE_SAVE_DATA_CONTACTS=true
+      - DATABASE_SAVE_DATA_CHATS=true
+      - CACHE_REDIS_ENABLED=true
+      - CACHE_REDIS_URI=redis://redis:6379/6
+      - CACHE_REDIS_PREFIX_KEY=evolution
+      - CACHE_REDIS_SAVE_INSTANCES=false
+      - CACHE_LOCAL_ENABLED=false
+    volumes:
+      - evolution_instances:/evolution/instances
+    depends_on:
+      - postgres
+      - redis
+
+  postgres:
+    container_name: evolution_postgres
+    image: postgres:15
+    restart: always
+    environment:
+      - POSTGRES_USER=evolution
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=evolution
+    volumes:
+      - evolution_postgres_data:/var/lib/postgresql/data
+
+  redis:
+    container_name: evolution_redis
+    image: redis:7
+    restart: always
+    volumes:
+      - evolution_redis_data:/data
+
+volumes:
+  evolution_instances:
+  evolution_postgres_data:
+  evolution_redis_data:
