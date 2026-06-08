@@ -258,10 +258,15 @@ function renderPreviewTable(data) {
   html += "</tbody>";
   previewTable.innerHTML = html;
 
-  const faltando = data.faltando || [];
-  if (faltando.length > 0) {
-    previewWarning.textContent = `⚠️ Coluna(s) não encontrada(s): ${faltando.join(", ")}. A automação usa o que houver disponível.`;
-    previewWarning.classList.remove("hidden");
+  // Mensagem da previa: o backend ja decide o texto e se e "ok" (verde) ou
+  // "aviso" (amarelo), de acordo com o modo (consulta so precisa de email).
+  const msg = data.mensagem_previa || "";
+  const status = data.status_previa || "";
+  previewWarning.classList.remove("hidden", "inline-ok", "inline-warning");
+  if (msg) {
+    const ok = status === "ok";
+    previewWarning.textContent = `${ok ? "✅" : "⚠️"} ${msg}`;
+    previewWarning.classList.add(ok ? "inline-ok" : "inline-warning");
   } else {
     previewWarning.classList.add("hidden");
   }

@@ -304,6 +304,17 @@ h2 { font-size: 18px; }
   margin-bottom: 8px;
 }
 
+.inline-ok {
+  background: var(--success-bg);
+  border: 1px solid var(--success-line);
+  border-radius: 7px;
+  color: var(--success);
+  font-size: 12.5px;
+  font-weight: 700;
+  padding: 8px 11px;
+  margin-bottom: 8px;
+}
+
 .table-scroll { overflow-x: auto; border: 1px solid var(--line-soft); border-radius: 8px; }
 .preview-table { border-collapse: collapse; font-size: 12.5px; width: 100%; min-width: 420px; }
 .preview-table th, .preview-table td {

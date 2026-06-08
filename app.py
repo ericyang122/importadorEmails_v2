@@ -612,7 +612,35 @@ def preview_planilha():
         ("Empreendimento", empreend_col),
     ]
     presentes = [(rotulo, col) for rotulo, col in mapa_exibicao if col and col in df.columns]
-    faltando = [rotulo for rotulo, col in mapa_exibicao if not col or col not in df.columns]
+    tem = {rotulo: (col is not None and col in df.columns) for rotulo, col in mapa_exibicao}
+
+    # Validacao por modo: cada modo precisa de colunas diferentes.
+    #  - consulta: basta o email (a automacao busca o telefone a partir dele);
+    #  - cadastro: precisa de Nome, Telefone, Corretor e Empreendimento.
+    if mode == "consulta":
+        if tem["Email"]:
+            faltando = []
+            status_previa = "ok"
+            mensagem_previa = (
+                f"Planilha de consulta OK — {validos} e-mail(s) prontos pra buscar telefone no Sigavi."
+            )
+        else:
+            faltando = ["Email"]
+            status_previa = "aviso"
+            mensagem_previa = (
+                "Nenhuma coluna de e-mail encontrada. No modo Consulta a planilha precisa ter uma coluna de e-mail."
+            )
+    else:  # cadastro
+        necessarias = ["Nome", "Telefone", "Corretor", "Empreendimento"]
+        faltando = [c for c in necessarias if not tem[c]]
+        if not faltando:
+            status_previa = "ok"
+            mensagem_previa = "Planilha de cadastro OK — todas as colunas necessárias foram encontradas."
+        else:
+            status_previa = "aviso"
+            mensagem_previa = (
+                f"Faltam colunas pro cadastro: {', '.join(faltando)}. A automação usa o que houver disponível."
+            )
 
     linhas = []
     for _, row in df.head(5).iterrows():
@@ -626,6 +654,8 @@ def preview_planilha():
         "colunas": [rotulo for rotulo, _ in presentes],
         "rows": linhas,
         "faltando": faltando,
+        "status_previa": status_previa,
+        "mensagem_previa": mensagem_previa,
         "mode": mode,
     })
 
