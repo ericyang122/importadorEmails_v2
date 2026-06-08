@@ -3,12 +3,22 @@ import re
 import time
 import json
 import os
+import sys
 import unicodedata
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import requests
 from dotenv import load_dotenv
+
+# Garante UTF-8 na saida do script. Sem isso, rodar o confio.py direto no
+# terminal do Windows (que usa cp1252) trava com UnicodeEncodeError ao imprimir
+# simbolos como ✓/✗. Pela interface ja vem UTF-8; aqui blindamos os dois casos.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Importa leads de uma planilha para o Sigavi.")
@@ -542,7 +552,32 @@ wait_visible((By.XPATH, "/html/body/div[2]/section/div[1]/div/div/div/form/div[1
 wait_visible((By.XPATH, "/html/body/div[2]/section/div[1]/div/div/div/form/div[1]/div[2]/div/input"))\
     .send_keys(SIGAVI_SENHA)
 safe_click((By.XPATH, "/html/body/div[2]/section/div[1]/div/div/div/form/div[1]/div[3]/div/button"))
+
+# =========================
+# VALIDA O LOGIN (melhoria nº 8)
+# Antes a automacao seguia mesmo se o login falhasse, gerando erro em TODAS as
+# linhas (foi o bug dos 51 erros). Agora confirma que de fato saiu da pagina de
+# login; se nao sair, para na hora com aviso claro em vez de rodar tudo errado.
+# =========================
+# Da tempo do POST de login processar e verifica de forma robusta: abre a home;
+# se a sessao nao estiver autenticada, o Sigavi redireciona de volta pro login.
+time.sleep(3)
+driver.get(BASE_URL + "/")
 time.sleep(2)
+_url_pos_login = driver.current_url.lower()
+if "login" in _url_pos_login or "/acesso" in _url_pos_login:
+    print(
+        "\nERRO: nao foi possivel entrar no Sigavi — o login nao foi concluido.\n"
+        "Causas mais comuns: usuario/senha incorretos, outra sessao do Sigavi "
+        "aberta em outro lugar (sessao concorrente) ou captcha.\n"
+        "Confira as credenciais, feche outras sessoes do Sigavi e rode de novo.\n"
+    )
+    try:
+        driver.quit()
+    except Exception:
+        pass
+    sys.exit(1)
+print("Login no Sigavi confirmado.")
 
 # =========================
 # SESSION REQUESTS (somente consulta)
