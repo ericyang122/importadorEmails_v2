@@ -9,6 +9,7 @@ import sys
 import threading
 import uuid
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from functools import wraps
 from pathlib import Path
 
@@ -36,6 +37,8 @@ app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_UPLOAD_MB", "25")) * 1024 
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "").strip().lower()
+    in {"1", "true", "yes", "sim"},
 )
 # Recarrega templates e nao deixa o navegador cachear CSS/JS durante o uso:
 # evita o descompasso "HTML velho + CSS novo" ao atualizar a interface.
@@ -77,6 +80,49 @@ def inject_template_values():
 
 def check_csrf():
     return request.form.get("csrf_token") == session.get("csrf_token")
+
+
+def normalizar_telefone(valor):
+    if valor is None:
+        return ""
+    texto = str(valor).strip()
+    if texto.lower() in {"", "nan", "none"}:
+        return ""
+    try:
+        numero = Decimal(texto)
+        if numero.is_finite() and numero == numero.to_integral_value():
+            return str(int(numero))
+    except InvalidOperation:
+        pass
+    return re.sub(r"\D", "", texto)
+
+
+def ler_planilha_upload(upload):
+    import pandas as pd
+
+    conteudo = upload.read()
+    upload.stream.seek(0)
+    excel = pd.ExcelFile(io.BytesIO(conteudo))
+    sheet = excel.sheet_names[0]
+    return excel.parse(sheet).rename(columns=COLUNAS_RENOMEAR), sheet
+
+
+def dados_validos_planilha(df, mode):
+    email_col = next((c for c in df.columns if re.match(r"e.?mail", str(c), re.IGNORECASE)), None)
+    if mode == "consulta":
+        if not email_col:
+            return 0, email_col
+        validos = int(
+            df[email_col].apply(
+                lambda valor: str(valor).strip().lower() not in {"", "nan", "none"}
+            ).sum()
+        )
+        return validos, email_col
+
+    if "FONE2" not in df.columns:
+        return 0, email_col
+    validos = int(df["FONE2"].apply(lambda valor: len(normalizar_telefone(valor)) >= 11).sum())
+    return validos, email_col
 
 
 def login_required(route):
@@ -382,7 +428,7 @@ def login():
     if not check_csrf():
         return redirect(url_for("index", login_error="Sessao expirada. Tente novamente."))
 
-    if request.form.get("password") != APP_PASSWORD:
+    if not secrets.compare_digest(request.form.get("password", ""), APP_PASSWORD):
         return redirect(url_for("index", login_error="Senha de acesso invalida."))
 
     session["authenticated"] = True
@@ -393,6 +439,8 @@ def login():
 @app.post("/logout")
 @login_required
 def logout():
+    if not check_csrf():
+        return redirect(url_for("index", login_error="Sessao expirada. Tente novamente."))
     session.clear()
     return redirect(url_for("index"))
 
@@ -425,6 +473,15 @@ def create_job():
     extension = Path(original_name).suffix.lower()
     if extension != ".xlsx":
         return jsonify({"error": "A planilha precisa estar no formato .xlsx."}), 400
+
+    try:
+        df, _sheet = ler_planilha_upload(upload)
+        validos, _email_col = dados_validos_planilha(df, mode)
+    except Exception as exc:
+        return jsonify({"error": f"Nao foi possivel ler a planilha: {exc}"}), 400
+    if validos == 0:
+        requisito = "e-mail" if mode == "consulta" else "telefone valido"
+        return jsonify({"error": f"A planilha nao possui nenhuma linha com {requisito}."}), 400
 
     job_id = uuid.uuid4().hex
     job_dir = UPLOAD_ROOT / job_id
@@ -573,33 +630,21 @@ def preview_planilha():
     upload = request.files.get("planilha")
     if not upload or not upload.filename:
         return jsonify({"error": "Nenhum arquivo enviado."}), 400
-    if Path(secure_filename(upload.filename)).suffix.lower() not in {".xlsx", ".xls"}:
-        return jsonify({"error": "Formato invalido. Use .xlsx ou .xls."}), 400
+    if Path(secure_filename(upload.filename)).suffix.lower() != ".xlsx":
+        return jsonify({"error": "Formato invalido. Use .xlsx."}), 400
 
     mode = request.form.get("mode", "consulta")
+    if mode not in {"consulta", "cadastro"}:
+        return jsonify({"error": "Modo de execucao invalido."}), 400
     try:
         import pandas as pd
 
-        excel = pd.ExcelFile(io.BytesIO(upload.read()))
-        sheet = excel.sheet_names[0]
-        df = excel.parse(sheet).rename(columns=COLUNAS_RENOMEAR)
+        df, sheet = ler_planilha_upload(upload)
     except Exception as exc:  # planilha corrompida, vazia, etc.
         return jsonify({"error": f"Nao foi possivel ler a planilha: {exc}"}), 400
 
     total = int(len(df))
-    email_col = next((c for c in df.columns if re.match(r"e.?mail", str(c), re.IGNORECASE)), None)
-
-    def _digitos(valor):
-        return re.sub(r"\D", "", "" if valor is None else str(valor))
-
-    # "Valido" depende do modo: consulta precisa de email; cadastro precisa de telefone.
-    if mode == "consulta":
-        if email_col:
-            validos = int(df[email_col].apply(lambda v: str(v).strip().lower() not in ("", "nan")).sum())
-        else:
-            validos = 0
-    else:
-        validos = int(df["FONE2"].apply(lambda v: len(_digitos(v)) >= 11).sum()) if "FONE2" in df.columns else 0
+    validos, email_col = dados_validos_planilha(df, mode)
     ignorados = max(0, total - validos)
 
     # Colunas amigaveis para a previa (so as que existirem na planilha).

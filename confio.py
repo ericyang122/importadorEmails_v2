@@ -7,6 +7,7 @@ import sys
 import unicodedata
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from decimal import Decimal, InvalidOperation
 import pandas as pd
 import requests
 from dotenv import load_dotenv
@@ -177,10 +178,23 @@ df = df.rename(columns={
 })
 
 # celular vem como float (ex: 1.199622e+10) → converte para string de dígitos
+def normalizar_telefone_planilha(valor):
+    if valor is None or pd.isna(valor):
+        return ''
+    texto = str(valor).strip()
+    if texto.lower() in ('', 'nan', 'none'):
+        return ''
+    try:
+        numero = Decimal(texto)
+        if numero.is_finite() and numero == numero.to_integral_value():
+            return str(int(numero))
+    except InvalidOperation:
+        pass
+    return re.sub(r'\D', '', texto)
+
+
 if 'FONE2' in df.columns:
-    df['FONE2'] = df['FONE2'].apply(
-        lambda x: str(int(x)) if pd.notna(x) and str(x).strip() not in ('', 'nan') else ''
-    )
+    df['FONE2'] = df['FONE2'].apply(normalizar_telefone_planilha)
 
 _nome_excel    = os.path.splitext(os.path.basename(arquivo_excel.lstrip('./')))[0]
 PROGRESSO_FILE = ARGS.progress_file or os.path.join(RESULT_DIR, f'progresso_{_nome_excel}_{MODE}.json')

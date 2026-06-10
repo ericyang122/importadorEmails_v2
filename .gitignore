@@ -7,3 +7,5 @@ backups/
 flask*.log
 abertos/*.xlsx
 resultados/*.xlsx
+.tools/
+runtime/

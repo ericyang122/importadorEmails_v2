@@ -65,6 +65,7 @@ const actionsFeed = document.querySelector("#actions-feed");
 let currentJobId = null;
 let pollTimer = null;
 let ignoradosPreview = 0;
+let previewValido = false;
 
 function csrf() {
   return form.querySelector("[name='csrf_token']").value;
@@ -86,6 +87,7 @@ function refreshSubmitState() {
     loginInput.value.trim() &&
     senhaInput.value.trim() &&
     fileInput.files.length > 0 &&
+    previewValido &&
     !currentJobId;
   submitButton.disabled = !pronto;
 }
@@ -146,14 +148,15 @@ function limparArquivo() {
   sumValid.textContent = "—";
   sumIgnored.textContent = "—";
   ignoradosPreview = 0;
+  previewValido = false;
   refreshSubmitState();
 }
 
 function aceitarArquivo(file) {
   const nome = file.name.toLowerCase();
-  if (!nome.endsWith(".xlsx") && !nome.endsWith(".xls")) {
+  if (!nome.endsWith(".xlsx")) {
     limparArquivo();
-    fileMessage.textContent = "Arquivo inválido. Selecione uma planilha .xlsx ou .xls.";
+    fileMessage.textContent = "Arquivo inválido. Selecione uma planilha .xlsx.";
     fileMessage.className = "field-hint error";
     return;
   }
@@ -170,6 +173,7 @@ function aceitarArquivo(file) {
   fileMessage.textContent = "";
   fileMessage.className = "field-hint";
   sumFile.textContent = file.name;
+  previewValido = false;
   refreshSubmitState();
   carregarPreview();
 }
@@ -229,14 +233,18 @@ async function carregarPreview() {
     sumIgnored.textContent = data.ignorados;
     ignoradosPreview = data.ignorados;
     metricIgnored.textContent = data.ignorados;
+    previewValido = data.validos > 0;
     fileMessage.textContent = `Planilha lida: ${data.total} linha(s), ${data.validos} válida(s).`;
-    fileMessage.className = "field-hint ok";
+    fileMessage.className = previewValido ? "field-hint ok" : "field-hint error";
 
     renderPreviewTable(data);
+    refreshSubmitState();
   } catch (err) {
+    previewValido = false;
     fileMessage.textContent = err.message;
     fileMessage.className = "field-hint error";
     previewBlock.classList.add("hidden");
+    refreshSubmitState();
   }
 }
 
