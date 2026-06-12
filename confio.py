@@ -278,6 +278,37 @@ def safe_click(locator):
     except (ElementClickInterceptedException, ElementNotInteractableException, TimeoutException):
         driver.execute_script("arguments[0].click();", el)
 
+def sessao_caiu_para_login():
+    """True se o Sigavi redirecionou pra tela de login (sessao expirada ou derrubada)."""
+    try:
+        url = (driver.current_url or '').lower()
+    except WebDriverException:
+        return False
+    return 'login' in url or '/acesso' in url
+
+def relogar_sigavi():
+    # O Sigavi derruba a sessao no meio do job (timeout de inatividade ou
+    # sessao concorrente em outro lugar) e passa a redirecionar /CRM/Fac pro
+    # login. Sem relogar aqui, TODO lead a partir da queda falhava com
+    # "Pagina /CRM/Fac nao carregou" ate o fim da planilha (job de 2026-06-11).
+    print("Sessao do Sigavi caiu (redirecionado pro login). Relogando...")
+    driver.get("https://abyara.sigavi360.com.br/Acesso/Login?ReturnUrl=%2F")
+    time.sleep(3)
+    wait_visible((By.XPATH, "/html/body/div[2]/section/div[1]/div/div/div/form/div[1]/div[1]/div/input"), timeout=30)\
+        .send_keys(SIGAVI_LOGIN)
+    wait_visible((By.XPATH, "/html/body/div[2]/section/div[1]/div/div/div/form/div[1]/div[2]/div/input"), timeout=30)\
+        .send_keys(SIGAVI_SENHA)
+    safe_click((By.XPATH, "/html/body/div[2]/section/div[1]/div/div/div/form/div[1]/div[3]/div/button"))
+    time.sleep(3)
+    driver.get(BASE_URL + "/")
+    time.sleep(2)
+    if sessao_caiu_para_login():
+        raise RuntimeError(
+            "Relogin no Sigavi nao foi aceito (voltou pra tela de login). "
+            "Possivel sessao concorrente aberta em outro lugar ou captcha."
+        )
+    print("Relogin no Sigavi concluido.")
+
 # =========================
 # HELPERS ROBUSTOS DE COMBO/INPUT (portados da automacao do Pedro, que valida
 # cada selecao em vez de mandar send_keys as cegas e torcer pra ter pegado)
@@ -539,6 +570,10 @@ def telefone_existe_no_sigavi(telefone, tentativas=3):
         try:
             driver.get('https://abyara.sigavi360.com.br/CRM/Fac')
             time.sleep(1)
+            if sessao_caiu_para_login():
+                relogar_sigavi()
+                driver.get('https://abyara.sigavi360.com.br/CRM/Fac')
+                time.sleep(1)
             if not preencher_input_visivel(telefone_busca_locators, telefone, 'Telefone da verificacao'):
                 continue
             clicar_buscar_fac()
@@ -1225,7 +1260,21 @@ try:
                     telefone_elem_busca = wait_visible(telefone_busca_locator, timeout=20)
                     break
                 except TimeoutException:
-                    print(f"Página /CRM/Fac não carregou (tentativa {tentativa+1}/3). Tentando novamente...")
+                    # Se o Sigavi mandou de volta pro login, a sessao caiu:
+                    # reloga e tenta de novo em vez de queimar as 3 tentativas
+                    # na tela de login (onde o campo de telefone nunca existe).
+                    if sessao_caiu_para_login():
+                        print(f"Página /CRM/Fac redirecionou pro login — sessão expirou (tentativa {tentativa+1}/3). Relogando...")
+                        try:
+                            relogar_sigavi()
+                        except Exception as exc_relogin:
+                            print(f"Relogin falhou: {exc_relogin}")
+                        continue
+                    try:
+                        url_atual = driver.current_url
+                    except WebDriverException:
+                        url_atual = '?'
+                    print(f"Página /CRM/Fac não carregou (tentativa {tentativa+1}/3, url atual: {url_atual}). Tentando novamente...")
             if telefone_elem_busca is None:
                 print(f"Não foi possível carregar a página de busca após 3 tentativas. Pulando {nome}.")
                 resultados_cadastro.append({
@@ -1327,9 +1376,33 @@ try:
             selecionar_midia_por_posicao(posicao_midia)
             pausa_cadastro(1)
 
-            # Equipe (gerente) — seleciona digitando e CONFERE se realmente pegou
+            # Equipe (gerente) — seleciona digitando e CONFERE se realmente pegou.
+            # Se a equipe/corretor estiverem no corretores.json mas NAO aparecerem
+            # no combo do Sigavi (ex.: JOTACE/Logan em 2026-06-11), cai pro
+            # fallback Tabatanascimento/Corretor Inativo em vez de pular o lead
+            # — mesma regra de quem nem esta no json.
             equipe_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[3]/div/div/div[1]/div[1]/div[1]/div[2]/div[1]/span[1]/span/span[1]')
-            if not selecionar_combo_texto(equipe_combo_locator, gerente, 'Equipe'):
+            corretor_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[3]/div/div/div[1]/div[1]/div[1]/div[2]/div[2]/div[1]/span[1]/span/span[1]')
+            ja_eh_inativo = (
+                normalizar_texto(gerente) == normalizar_texto('Tabatanascimento')
+                and normalizar_texto(corretor) == normalizar_texto('Corretor Inativo')
+            )
+
+            equipe_ok = selecionar_combo_texto(equipe_combo_locator, gerente, 'Equipe')
+            if not equipe_ok and not ja_eh_inativo:
+                print(f"Equipe '{gerente}' nao apareceu no combo do Sigavi. Cadastrando {nome} como Tabatanascimento / Corretor Inativo.")
+                resultados_corretor_inativo.append({
+                    'Linha': index + 1,
+                    'Nome': nome,
+                    'Email': email_raw,
+                    'Telefone': telefone,
+                    'Status': 'corretor_inativo',
+                    'Detalhe': f"Equipe '{gerente}' nao apareceu no combo do Sigavi; cadastrado como Tabatanascimento/Corretor Inativo.",
+                })
+                gerente, corretor = 'Tabatanascimento', 'Corretor Inativo'
+                ja_eh_inativo = True
+                equipe_ok = selecionar_combo_texto(equipe_combo_locator, gerente, 'Equipe')
+            if not equipe_ok:
                 print(f"[ERRO] Equipe '{gerente}' nao selecionada para {nome}. Pulando lead.")
                 resultados_cadastro.append({
                     'Linha': index + 1,
@@ -1345,8 +1418,23 @@ try:
             # Corretor — espera a lista da equipe carregar antes de selecionar
             print(f"Aguardando lista de corretores da equipe {gerente} para selecionar: {corretor}")
             pausa_cadastro(2)
-            corretor_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[3]/div/div/div[1]/div[1]/div[1]/div[2]/div[2]/div[1]/span[1]/span/span[1]')
-            if not selecionar_combo_texto(corretor_combo_locator, corretor, 'Corretor'):
+            corretor_ok = selecionar_combo_texto(corretor_combo_locator, corretor, 'Corretor')
+            if not corretor_ok and not ja_eh_inativo:
+                print(f"Corretor '{corretor}' nao apareceu na lista da equipe {gerente}. Cadastrando {nome} como Tabatanascimento / Corretor Inativo.")
+                resultados_corretor_inativo.append({
+                    'Linha': index + 1,
+                    'Nome': nome,
+                    'Email': email_raw,
+                    'Telefone': telefone,
+                    'Status': 'corretor_inativo',
+                    'Detalhe': f"Corretor '{corretor}' nao apareceu no combo da equipe {gerente} no Sigavi; cadastrado como Tabatanascimento/Corretor Inativo.",
+                })
+                gerente, corretor = 'Tabatanascimento', 'Corretor Inativo'
+                ja_eh_inativo = True
+                if selecionar_combo_texto(equipe_combo_locator, gerente, 'Equipe'):
+                    pausa_cadastro(2)
+                    corretor_ok = selecionar_combo_texto(corretor_combo_locator, corretor, 'Corretor')
+            if not corretor_ok:
                 print(f"[ERRO] Corretor '{corretor}' nao selecionado para {nome}. Pulando lead.")
                 resultados_cadastro.append({
                     'Linha': index + 1,
