@@ -1388,7 +1388,15 @@ try:
                 and normalizar_texto(corretor) == normalizar_texto('Corretor Inativo')
             )
 
-            equipe_ok = selecionar_combo_texto(equipe_combo_locator, gerente, 'Equipe')
+            # Uma tratativa so pro nome da planilha: a tentativa unica ja digita
+            # E procura na lista aberta; se nao achou, vai direto pro fallback
+            # de Corretor Inativo em vez de repetir tudo 4x (lento a toa).
+            # So o fallback (Tabatanascimento/Corretor Inativo) mantem as 4
+            # tentativas, porque falhar nele significa pular o lead.
+            equipe_ok = selecionar_combo_texto(
+                equipe_combo_locator, gerente, 'Equipe',
+                tentativas=4 if ja_eh_inativo else 1,
+            )
             if not equipe_ok and not ja_eh_inativo:
                 print(f"Equipe '{gerente}' nao apareceu no combo do Sigavi. Cadastrando {nome} como Tabatanascimento / Corretor Inativo.")
                 resultados_corretor_inativo.append({
@@ -1418,7 +1426,10 @@ try:
             # Corretor — espera a lista da equipe carregar antes de selecionar
             print(f"Aguardando lista de corretores da equipe {gerente} para selecionar: {corretor}")
             pausa_cadastro(2)
-            corretor_ok = selecionar_combo_texto(corretor_combo_locator, corretor, 'Corretor')
+            corretor_ok = selecionar_combo_texto(
+                corretor_combo_locator, corretor, 'Corretor',
+                tentativas=4 if ja_eh_inativo else 1,
+            )
             if not corretor_ok and not ja_eh_inativo:
                 print(f"Corretor '{corretor}' nao apareceu na lista da equipe {gerente}. Cadastrando {nome} como Tabatanascimento / Corretor Inativo.")
                 resultados_corretor_inativo.append({
