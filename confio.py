@@ -105,6 +105,9 @@ CONSULTA_BACKOFF = float(os.getenv("SIGAVI_CONSULTA_BACKOFF", "1.5"))
 # 1.0 = comportamento original. Abaixe (ex: 0.6) para acelerar; suba se a tela
 # do Sigavi estiver lenta e o cadastro comecar a falhar.
 CADASTRO_DELAY = max(0.1, float(os.getenv("SIGAVI_CADASTRO_DELAY", "1.0")))
+# Termo digitado no modal "Imovel de origem" para escolher o empreendimento do
+# cadastro. Trocavel pelo .env (SIGAVI_EMPREENDIMENTO=arvo) sem mexer no codigo.
+EMPREENDIMENTO_BUSCA = (os.getenv("SIGAVI_EMPREENDIMENTO", "arvo").strip() or "arvo")
 # Protege a renovacao de cookies/token (o driver Selenium nao e thread-safe).
 _token_lock = threading.Lock()
 
@@ -274,6 +277,283 @@ def safe_click(locator):
         el.click()
     except (ElementClickInterceptedException, ElementNotInteractableException, TimeoutException):
         driver.execute_script("arguments[0].click();", el)
+
+# =========================
+# HELPERS ROBUSTOS DE COMBO/INPUT (portados da automacao do Pedro, que valida
+# cada selecao em vez de mandar send_keys as cegas e torcer pra ter pegado)
+# =========================
+def texto_elemento(el):
+    return (driver.execute_script(
+        "return arguments[0].value || arguments[0].innerText || arguments[0].textContent || '';",
+        el,
+    ) or '').strip()
+
+def combo_preenchido(locator, valor_esperado=''):
+    """Confere se o combo mostra o valor esperado (e nao '---' ou vazio)."""
+    try:
+        texto = texto_elemento(wait_visible(locator, timeout=5))
+    except TimeoutException:
+        return False
+    texto_norm = normalizar_texto(texto)
+    valor_norm = normalizar_texto(valor_esperado)
+    if not texto_norm or texto.strip() == '---':
+        return False
+    return not valor_norm or valor_norm in texto_norm or texto_norm in valor_norm
+
+def elementos_visiveis(locators):
+    elementos = []
+    for locator in locators:
+        for el in driver.find_elements(*locator):
+            try:
+                if el.is_displayed() and el.is_enabled():
+                    elementos.append(el)
+            except Exception:
+                pass
+    return elementos
+
+def dropdowns_combo_visiveis():
+    return driver.execute_script("""
+        return Array.from(document.querySelectorAll('div, ul, ol')).filter(function(el) {
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            if (rect.width < 100 || rect.width > 900 || rect.height < 35 || rect.height > 600) return false;
+            if (el.scrollHeight <= el.clientHeight + 8) return false;
+            const cls = String(el.className || '').toLowerCase();
+            const txt = String(el.innerText || '').trim();
+            const looksLikeCombo = cls.includes('select2') || cls.includes('dropdown') || cls.includes('result') || cls.includes('combo') || txt.split('\\n').length >= 3;
+            return looksLikeCombo;
+        });
+    """)
+
+def input_combo_aberto(timeout=8):
+    locators = [
+        (By.XPATH, "//div[contains(@class, 'select2-drop') and not(contains(@style, 'display: none'))]//input"),
+        (By.XPATH, "//span[contains(@class, 'select2-container--open')]//input"),
+        (By.XPATH, "//input[contains(@class, 'select2-input') or contains(@class, 'select2-search__field')]"),
+    ]
+    fim = time.time() + timeout
+    while time.time() < fim:
+        elementos = elementos_visiveis(locators)
+        if elementos:
+            return elementos[-1]
+        time.sleep(0.2)
+    raise TimeoutException("Input aberto do combo nao encontrado")
+
+def clicar_opcao_combo(valor, timeout=8):
+    valor_norm = normalizar_texto(valor)
+    locators = [
+        (By.XPATH, "//*[contains(@class, 'select2-result-label')]"),
+        (By.XPATH, "//*[contains(@class, 'select2-results__option')]"),
+        (By.XPATH, "//*[contains(@class, 'select2-result') and not(contains(@class, 'select2-searching'))]"),
+        (By.XPATH, "//*[@role='option']"),
+    ]
+    fim = time.time() + timeout
+    for dropdown in dropdowns_combo_visiveis():
+        try:
+            driver.execute_script("arguments[0].scrollTop = 0;", dropdown)
+        except Exception:
+            pass
+    opcoes_vistas = set()
+    while time.time() < fim:
+        opcoes = []
+        for el in elementos_visiveis(locators):
+            texto = texto_elemento(el)
+            texto_norm = normalizar_texto(texto)
+            if not texto_norm:
+                continue
+            if len(texto_norm) <= 40:
+                opcoes_vistas.add(texto_norm)
+            if texto_norm == valor_norm:
+                opcoes.insert(0, el)
+            elif valor_norm in texto_norm or texto_norm in valor_norm:
+                opcoes.append(el)
+        if opcoes:
+            opcao = opcoes[0]
+            scroll_into_view(opcao)
+            try:
+                opcao.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", opcao)
+            return True
+        for dropdown in dropdowns_combo_visiveis():
+            try:
+                candidatos = dropdown.find_elements(By.XPATH, ".//*[self::li or self::div or self::span or self::a][normalize-space()]")
+                for el in candidatos:
+                    try:
+                        if not el.is_displayed():
+                            continue
+                        texto = texto_elemento(el)
+                        texto_norm = normalizar_texto(texto)
+                        if texto_norm and len(texto_norm) <= 40:
+                            opcoes_vistas.add(texto_norm)
+                        if texto_norm == valor_norm or valor_norm in texto_norm or texto_norm in valor_norm:
+                            scroll_into_view(el)
+                            try:
+                                el.click()
+                            except Exception:
+                                driver.execute_script("arguments[0].click();", el)
+                            return True
+                    except Exception:
+                        pass
+                driver.execute_script("arguments[0].scrollTop = arguments[0].scrollTop + Math.max(80, arguments[0].clientHeight - 20);", dropdown)
+            except Exception:
+                pass
+        time.sleep(0.4)
+    if opcoes_vistas:
+        print(f"Opcoes vistas ao procurar '{valor}': {', '.join(sorted(opcoes_vistas)[:12])}")
+    return False
+
+def selecionar_combo_texto(locator, valor, nome_campo, tentativas=4):
+    """Seleciona uma opcao de combo digitando o texto e CONFERINDO se pegou."""
+    for tentativa in range(1, tentativas + 1):
+        safe_click(locator)
+        time.sleep(0.6)
+        try:
+            try:
+                campo_busca = input_combo_aberto(timeout=1.5)
+                campo_busca.click()
+                ActionChains(driver)\
+                    .key_down(Keys.CONTROL).send_keys('a').key_up(Keys.CONTROL)\
+                    .send_keys(Keys.DELETE)\
+                    .send_keys(valor)\
+                    .perform()
+                time.sleep(1.2)
+            except TimeoutException:
+                # Combo sem input de busca (estilo Kendo): digitar com o combo
+                # focado pula direto pro item correspondente (era assim que o
+                # codigo antigo selecionava CESARRICARDO digitando so CESAR).
+                # A caca visual sozinha falha com opcoes fora da tela (ex.:
+                # ELAINE, que exige rolar a lista ate o E).
+                print(f"{nome_campo} sem input de busca; digitando '{valor}' direto no combo.")
+                ActionChains(driver).send_keys(valor).perform()
+                time.sleep(0.8)
+                ActionChains(driver).send_keys(Keys.ENTER).perform()
+                time.sleep(0.6)
+                if combo_preenchido(locator, valor):
+                    return True
+                print(f"Digitar direto nao selecionou {nome_campo}; procurando na lista aberta: {valor}")
+                safe_click(locator)
+                time.sleep(0.6)
+            if not clicar_opcao_combo(valor, timeout=10):
+                print(f"Opcao nao apareceu em {nome_campo}: {valor}")
+        except Exception as e:
+            print(f"Falha ao pesquisar opcao em {nome_campo} ({valor}): {e}")
+            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+            time.sleep(0.5)
+            continue
+        time.sleep(1)
+        if combo_preenchido(locator, valor):
+            return True
+        print(f"{nome_campo} nao foi selecionado (tentativa {tentativa}/{tentativas}): {valor}")
+    return False
+
+def primeiro_elemento_visivel(locators, timeout=20):
+    fim = time.time() + timeout
+    while time.time() < fim:
+        for locator in locators:
+            for el in driver.find_elements(*locator):
+                try:
+                    if el.is_displayed() and el.is_enabled():
+                        return el
+                except Exception:
+                    pass
+        time.sleep(0.2)
+    raise TimeoutException(f"Nenhum elemento visivel encontrado: {locators}")
+
+def preencher_input_visivel(locators, valor, nome_campo, tentativas=3):
+    valor_digits = re.sub(r'\D', '', str(valor))
+    for tentativa in range(1, tentativas + 1):
+        el = primeiro_elemento_visivel(locators, timeout=10)
+        scroll_into_view(el)
+        try:
+            el.click()
+            ActionChains(driver)\
+                .key_down(Keys.CONTROL).send_keys('a').key_up(Keys.CONTROL)\
+                .send_keys(Keys.DELETE)\
+                .send_keys(valor)\
+                .perform()
+        except Exception:
+            driver.execute_script(
+                "arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('input', {bubbles: true})); arguments[0].dispatchEvent(new Event('change', {bubbles: true}));",
+                el,
+                valor,
+            )
+        time.sleep(0.3)
+        valor_atual = re.sub(r'\D', '', el.get_attribute('value') or '')
+        if valor_digits and valor_digits in valor_atual:
+            return True
+        print(f"{nome_campo} nao recebeu valor (tentativa {tentativa}/{tentativas}). Valor atual: {valor_atual}")
+    return False
+
+def clicar_buscar_fac():
+    buscar_locators = [
+        (By.XPATH, "//button[contains(normalize-space(.), 'Buscar')]"),
+        (By.XPATH, "//a[contains(normalize-space(.), 'Buscar')]"),
+        (By.XPATH, "//*[self::button or self::a][contains(@title, 'Buscar')]"),
+        (By.XPATH, "//*[self::button or self::a][contains(@class, 'btn') and .//*[contains(@class, 'search')]]"),
+        (By.XPATH, "/html/body/section/section/div/div/div[2]/div/div[1]/form/div[4]/div/button[2]"),
+    ]
+    el = primeiro_elemento_visivel(buscar_locators, timeout=10)
+    scroll_into_view(el)
+    try:
+        el.click()
+    except Exception:
+        driver.execute_script("arguments[0].click();", el)
+
+def resumo_resultado_busca():
+    texto_pagina = (driver.find_element(By.TAG_NAME, 'body').text or '').strip()
+    linhas = driver.find_elements(By.XPATH, "//div[contains(., 'RESULTADO DA BUSCA')]/following::table[1]//tbody/tr")
+    linhas_texto = []
+    for linha in linhas:
+        texto = (linha.text or '').strip()
+        if texto:
+            linhas_texto.append(texto)
+    return texto_pagina, linhas_texto
+
+def aguardar_resultado_busca(timeout=6):
+    fim = time.time() + timeout
+    texto_pagina = ''
+    linhas_texto = []
+    while time.time() < fim:
+        texto_pagina, linhas_texto = resumo_resultado_busca()
+        pagina_upper = texto_pagina.upper()
+        tem_contador = re.search(r'EXIBINDO\s+ITENS', pagina_upper) is not None
+        if linhas_texto or 'NENHUM' in pagina_upper or tem_contador:
+            return texto_pagina, linhas_texto
+        time.sleep(0.5)
+    return texto_pagina, linhas_texto
+
+def telefone_existe_no_sigavi(telefone, tentativas=3):
+    """Confirma na busca do Fac se o telefone realmente entrou no Sigavi."""
+    telefone_busca_locators = [
+        (By.XPATH, "//input[contains(translate(@placeholder, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'telefone')]"),
+        (By.XPATH, "//input[contains(translate(@name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'telefone')]"),
+        (By.XPATH, "//input[contains(translate(@id, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'telefone')]"),
+        (By.XPATH, "//label[contains(normalize-space(.), 'Telefone')]/following::input[1]"),
+        (By.XPATH, '/html/body/section/section/div/div/div[2]/div/div[1]/form/div[3]/div/div[3]/input'),
+        (By.XPATH, '/html/body/section/section/div/div/div[2]/div/div[1]/form/div[2]/div/div/div/div[10]/div[4]/input'),
+    ]
+    telefone_digits = re.sub(r'\D', '', str(telefone))
+    for tentativa in range(1, tentativas + 1):
+        try:
+            driver.get('https://abyara.sigavi360.com.br/CRM/Fac')
+            time.sleep(1)
+            if not preencher_input_visivel(telefone_busca_locators, telefone, 'Telefone da verificacao'):
+                continue
+            clicar_buscar_fac()
+            time.sleep(1)
+            texto_pagina, linhas_texto = aguardar_resultado_busca(timeout=8)
+            texto_linha = ' | '.join(linhas_texto)
+            pagina_upper = texto_pagina.upper()
+            telefone_na_linha = telefone_digits and telefone_digits in re.sub(r'\D', '', texto_linha)
+            tem_itens = re.search(r'EXIBINDO\s+ITENS\s+1\s*-\s*\d+\s+DE\s+[1-9]\d*', pagina_upper) is not None
+            if telefone_na_linha or tem_itens:
+                return True, texto_linha or 'Busca por telefone retornou item'
+            print(f"Verificacao pos-salvar nao encontrou {telefone} (tentativa {tentativa}/{tentativas}).")
+        except Exception as e:
+            print(f"Falha na verificacao pos-salvar de {telefone} (tentativa {tentativa}/{tentativas}): {e}")
+    return False, 'Telefone nao apareceu na busca apos salvar'
 
 # =========================
 # BUSCA POR EMAIL VIA REQUESTS (sem abrir nova aba)
@@ -622,6 +902,11 @@ else:
 # =========================
 _ultimo_index, resultados_email, resultados_cadastro = carregar_progresso()
 
+# Leads cujo CORRETOR DE ORIGEM nao existe no corretores.json (cadastrados como
+# Tabatanascimento/Corretor Inativo) — relatorio proprio, como na automacao do
+# Pedro, pra Marketing revisar depois quem caiu nessa regra.
+resultados_corretor_inativo = []
+
 if MODE == 'consulta':
     print("Modo selecionado: somente consulta.")
 else:
@@ -631,6 +916,11 @@ else:
 
 # mapa para tolerar variações de caixa no dicionário
 mapa_corretores = {str(k).upper(): v for k, v in corretores_gerentes.items()}
+
+# Nomes oficiais das equipes (valores do corretores.json). Usados pra traduzir
+# apelido vindo da planilha (ex.: 'ELAINE') pro nome que existe no combo do
+# Sigavi (ex.: 'Elainemaion') antes de tentar selecionar.
+equipes_oficiais = sorted(set(corretores_gerentes.values()))
 
 # mapa de fallback: só o nome base antes de sufixos como "- Inc", "- Pagadoria", "- IND", etc.
 # ex: "DIMI - INC" → chave base "DIMI"
@@ -665,11 +955,16 @@ def _salvar_excel_resultado(anunciar=False):
         if df_todos.empty:
             df_todos = pd.DataFrame(columns=colunas)
 
+        df_inativos = pd.DataFrame(resultados_corretor_inativo, columns=colunas)
+        if df_inativos.empty:
+            df_inativos = pd.DataFrame(columns=colunas)
+
         relatorios = {
             'cadastrados': df_todos[df_todos['Status'] == 'cadastrado'].reset_index(drop=True),
             'duplicados': df_todos[df_todos['Status'] == 'duplicado'].reset_index(drop=True),
             'nao_cadastrados': df_todos[df_todos['Status'] == 'nao_cadastrado'].reset_index(drop=True),
             'erros_cadastro': df_todos[df_todos['Status'] == 'erro_cadastro'].reset_index(drop=True),
+            'corretores_inativos': df_inativos.reset_index(drop=True),
         }
 
     for sufixo, dataframe in relatorios.items():
@@ -693,7 +988,8 @@ def _salvar_excel_resultado(anunciar=False):
                 f"{len(relatorios['cadastrados'])} cadastrado(s), "
                 f"{len(relatorios['duplicados'])} duplicado(s), "
                 f"{len(relatorios['nao_cadastrados'])} nao cadastrado(s), "
-                f"{len(relatorios['erros_cadastro'])} erro(s)."
+                f"{len(relatorios['erros_cadastro'])} erro(s), "
+                f"{len(relatorios['corretores_inativos'])} com corretor inativo."
             )
 
 
@@ -866,26 +1162,57 @@ try:
         tipo_plantao_norm = normalizar_texto(tipo_plantao_raw)
         posicao_midia = midia_por_tipo_plantao.get(tipo_plantao_norm, 16)  # default: Outros
 
-        gerente_planilha = str(row.get('GERENTE') or '').strip()
-        if gerente_planilha:
-            gerente  = gerente_planilha
-            corretor = corretor_original_raw.strip() or "Corretor Inativo"
-        elif corretor_original_norm in mapa_corretores:
+        # Regra de negocio (igual a automacao do Pedro/automa-o_abyara): a
+        # equipe SEMPRE sai do corretores.json a partir do CORRETOR DE ORIGEM
+        # — a coluna GERENTE da planilha NAO e usada (vem com apelido, ex.
+        # 'ELAINE', que nao existe no combo do Sigavi). Corretor fora do json
+        # = corretor inativo -> cadastra como Tabatanascimento/Corretor Inativo
+        # (cadastra mesmo assim, nao pula o lead).
+        if corretor_original_norm in mapa_corretores:
             gerente  = mapa_corretores[corretor_original_norm]
             corretor = corretor_original_raw.strip()
         elif corretor_original_norm in mapa_corretores_base:
             gerente  = mapa_corretores_base[corretor_original_norm]
             corretor = corretor_original_raw.strip()
+            print(f"Corretor '{corretor_original_raw}' encontrado via nome base (sem sufixo). Gerente: {gerente}")
         else:
+            print(f"Corretor '{corretor_original_raw}' nao encontrado no corretores.json (inativo). Cadastrando como equipe Tabatanascimento / Corretor Inativo.")
             gerente  = "Tabatanascimento"
             corretor = "Corretor Inativo"
+            resultados_corretor_inativo.append({
+                'Linha': index + 1,
+                'Nome': nome,
+                'Email': email_raw,
+                'Telefone': telefone,
+                'Status': 'corretor_inativo',
+                'Detalhe': f"Corretor '{corretor_original_raw.strip() or '(vazio)'}' nao encontrado no corretores.json; cadastrado como Tabatanascimento/Corretor Inativo.",
+            })
+
+        # Traduz apelido de equipe pro nome oficial quando bater com exatamente
+        # UMA equipe do corretores.json (ex.: ELAINE -> Elainemaion). Sem isso o
+        # combo do Sigavi nao acha a opcao e o lead e pulado a toa.
+        gerente_norm_aj = normalizar_texto(gerente)
+        if gerente_norm_aj and all(normalizar_texto(e) != gerente_norm_aj for e in equipes_oficiais):
+            candidatas = [
+                e for e in equipes_oficiais
+                if gerente_norm_aj in normalizar_texto(e) or normalizar_texto(e) in gerente_norm_aj
+            ]
+            if len(candidatas) == 1:
+                print(f"Equipe '{gerente}' ajustada para '{candidatas[0]}' (nome oficial do corretores.json).")
+                gerente = candidatas[0]
+            elif len(candidatas) > 1:
+                print(f"Equipe '{gerente}' bate com varias do corretores.json ({', '.join(candidatas[:4])}); mantendo como veio.")
     
         canal_setas = 4 if tipo_plantao_norm in canal_plantao_tipos else 1
         if tipo_plantao_norm in canal_carteira_tipos:
             canal_setas = 1
     
     
-        try:
+        # Cada lead tem ate 2 tentativas completas: se falhar no meio (combo,
+        # modal, crash do browser), roda o lead de novo uma vez; persistindo o
+        # erro, registra na planilha e PULA pro proximo (nao trava o job).
+        for tentativa_lead in (1, 2):
+          try:
             # Página de busca (apenas preenche telefone; não valida duplicidade aqui)
             telefone_busca_locator = (By.XPATH, '/html/body/section/section/div/div/div[2]/div/div[1]/form/div[2]/div/div/div/div[10]/div[4]/input')
             telefone_elem_busca = None
@@ -910,7 +1237,7 @@ try:
                     'Detalhe': 'Pagina /CRM/Fac nao carregou para verificar duplicidade.',
                 })
                 salvar_estado(index)
-                continue
+                break
             scroll_into_view(telefone_elem_busca)
     
             # limpa e digita
@@ -948,7 +1275,7 @@ try:
                     'Detalhe': 'Telefone ja encontrado no Sigavi antes do cadastro.',
                 })
                 salvar_estado(index)
-                continue
+                break
     
             # navegação leve (como no seu script)
             ActionChains(driver).send_keys(Keys.ARROW_DOWN).perform()
@@ -1000,34 +1327,103 @@ try:
             selecionar_midia_por_posicao(posicao_midia)
             pausa_cadastro(1)
 
-            # Equipe (gerente)
+            # Equipe (gerente) — seleciona digitando e CONFERE se realmente pegou
             equipe_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[3]/div/div/div[1]/div[1]/div[1]/div[2]/div[1]/span[1]/span/span[1]')
-            safe_click(equipe_combo_locator)
-            ActionChains(driver).send_keys(gerente, Keys.ENTER).perform()
-            pausa_cadastro(0.8)
+            if not selecionar_combo_texto(equipe_combo_locator, gerente, 'Equipe'):
+                print(f"[ERRO] Equipe '{gerente}' nao selecionada para {nome}. Pulando lead.")
+                resultados_cadastro.append({
+                    'Linha': index + 1,
+                    'Nome': nome,
+                    'Email': email_raw,
+                    'Telefone': telefone,
+                    'Status': 'erro_cadastro',
+                    'Detalhe': f"Equipe '{gerente}' nao foi selecionada no formulario.",
+                })
+                salvar_estado(index)
+                break
 
-            # Corretor
+            # Corretor — espera a lista da equipe carregar antes de selecionar
+            print(f"Aguardando lista de corretores da equipe {gerente} para selecionar: {corretor}")
+            pausa_cadastro(2)
             corretor_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[3]/div/div/div[1]/div[1]/div[1]/div[2]/div[2]/div[1]/span[1]/span/span[1]')
-            safe_click(corretor_combo_locator)
-            ActionChains(driver).send_keys(corretor, Keys.ENTER).perform()
-            pausa_cadastro(0.8)
+            if not selecionar_combo_texto(corretor_combo_locator, corretor, 'Corretor'):
+                print(f"[ERRO] Corretor '{corretor}' nao selecionado para {nome}. Pulando lead.")
+                resultados_cadastro.append({
+                    'Linha': index + 1,
+                    'Nome': nome,
+                    'Email': email_raw,
+                    'Telefone': telefone,
+                    'Status': 'erro_cadastro',
+                    'Detalhe': f"Corretor '{corretor}' nao foi selecionado no formulario (equipe: {gerente}).",
+                })
+                salvar_estado(index)
+                break
     
             # Abre modal "Imóvel/Origem"
             safe_click((By.XPATH, "/html/body/div[2]/form/div[3]/div/div/div[1]/div[2]/div[2]/a/span"))
             modal_container = wait_visible((By.XPATH, "/html/body/div[2]/div[2]/div/div"))
     
-            # Seleciona a opção dentro do modal
-            safe_click((By.XPATH, "/html/body/div[2]/div[2]/div/div/div[2]/div[1]/div/div/label[2]"))
-    
-            # Preenche o código/descrição
-            your_code_input_locator = (By.XPATH, "/html/body/div[2]/div[2]/div/div/div[2]/div[3]/div[1]/input")
-            your_code = wait_visible(your_code_input_locator)
-            your_code.clear()
-            your_code.send_keys("lume")
-            pausa_cadastro(0.5)
+            # Seleciona a opção dentro do modal, SE existir. No modal atual do
+            # Sigavi nao tem mais os labels de tipo (so campo + Buscar); esperar
+            # 20s por um label fantasma era o que "travava" e virava o falso
+            # "Browser caiu" (TimeoutException herda de WebDriverException).
+            try:
+                opcao_modal = WebDriverWait(driver, 3).until(
+                    EC.element_to_be_clickable((By.XPATH, "/html/body/div[2]/div[2]/div/div/div[2]/div[1]/div/div/label[2]"))
+                )
+                opcao_modal.click()
+                pausa_cadastro(0.5)
+            except TimeoutException:
+                print("Modal sem opcoes de tipo (label[2] nao existe); indo direto pro campo de busca.")
 
-            # Confirma modal
-            safe_click((By.XPATH, "/html/body/div[2]/div[2]/div/div/div[2]/div[3]/div[2]/button"))
+            # Preenche o empreendimento e CONFERE que o texto entrou no campo.
+            # O campo e localizado pelo placeholder 'Empreendimento' (robusto a
+            # mudancas de layout), com o XPath absoluto antigo como fallback.
+            empreendimento_input_locators = [
+                (By.XPATH, "//input[contains(translate(@placeholder, 'EMPRENDIMTO', 'emprendimto'), 'empreendimento')]"),
+                (By.XPATH, "/html/body/div[2]/div[2]/div/div/div[2]/div[3]/div[1]/input"),
+                (By.XPATH, "/html/body/div[2]/div[2]/div/div//input[@type='text']"),
+            ]
+            empreendimento_ok = False
+            for tentativa_emp in range(1, 4):
+                try:
+                    your_code = primeiro_elemento_visivel(empreendimento_input_locators, timeout=8)
+                except TimeoutException:
+                    print(f"Campo de busca do modal nao apareceu (tentativa {tentativa_emp}/3).")
+                    continue
+                scroll_into_view(your_code)
+                try:
+                    # jeito do Pedro: send_keys direto no elemento (foca sozinho)
+                    your_code.clear()
+                    your_code.send_keys(EMPREENDIMENTO_BUSCA)
+                except Exception as e_fill:
+                    print(f"send_keys no campo do modal falhou ({e_fill}); preenchendo via JS.")
+                    driver.execute_script(
+                        "arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('input', {bubbles: true})); arguments[0].dispatchEvent(new Event('change', {bubbles: true}));",
+                        your_code,
+                        EMPREENDIMENTO_BUSCA,
+                    )
+                pausa_cadastro(0.5)
+                valor_atual = (your_code.get_attribute('value') or '').strip()
+                if EMPREENDIMENTO_BUSCA.lower() in valor_atual.lower():
+                    empreendimento_ok = True
+                    print(f"Empreendimento '{valor_atual}' digitado no modal.")
+                    break
+                print(f"Campo Empreendimento nao recebeu '{EMPREENDIMENTO_BUSCA}' (tentativa {tentativa_emp}/3). Valor atual: '{valor_atual}'")
+            if not empreendimento_ok:
+                raise Exception(f"Campo Empreendimento do modal nao recebeu o texto '{EMPREENDIMENTO_BUSCA}'.")
+
+            # Confirma modal (botao Buscar) — por texto, com fallback no XPath antigo
+            buscar_modal_locators = [
+                (By.XPATH, "/html/body/div[2]/div[2]/div/div//button[contains(normalize-space(.), 'Buscar')]"),
+                (By.XPATH, "/html/body/div[2]/div[2]/div/div/div[2]/div[3]/div[2]/button"),
+            ]
+            botao_buscar = primeiro_elemento_visivel(buscar_modal_locators, timeout=10)
+            scroll_into_view(botao_buscar)
+            try:
+                botao_buscar.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", botao_buscar)
             pausa_cadastro(1)
 
             # Botão que às vezes fica atrás de overlay
@@ -1038,9 +1434,13 @@ try:
             safe_click((By.XPATH, "/html/body/div[2]/form/div[1]/div/div[1]/button[2]"))
             pausa_cadastro(2)
     
-            # 2) Tenta fechar popup de duplicidade (se existir)
+            # 2) Tenta fechar popup de duplicidade (se existir) — espera curta
+            # (4s) pra nao segurar 20s em todo lead em que o popup nao aparece
             try:
-                safe_click((By.XPATH, '//*[@id="popVerificaDuplicidade"]/div/div/div[3]/button'))
+                botao_dup = WebDriverWait(driver, 4).until(
+                    EC.element_to_be_clickable((By.XPATH, '//*[@id="popVerificaDuplicidade"]/div/div/div[3]/button'))
+                )
+                botao_dup.click()
                 pausa_cadastro(0.5)
                 print(f"Lead duplicado encontrado para telefone {telefone}. Pulando {nome}.")
                 resultados_cadastro.append({
@@ -1052,24 +1452,59 @@ try:
                     'Detalhe': 'Popup de duplicidade apareceu no cadastro.',
                 })
                 salvar_estado(index)
-                continue
+                break
             except Exception:
                 pass
     
             # 3) Salvar
             safe_click((By.XPATH, '//*[@id="cmdSalva"]'))
             pausa_cadastro(3)
-            print(f"[CADASTRADO] {telefone}")
+
+            # Confirma que o lead realmente entrou (busca o telefone no Fac);
+            # so marca 'cadastrado' com confirmacao — sem ela vira erro p/ revisao.
+            cadastro_confirmado, detalhe_confirmacao = telefone_existe_no_sigavi(telefone)
+            if cadastro_confirmado:
+                print(f"[CADASTRADO] {telefone}")
+                resultados_cadastro.append({
+                    'Linha': index + 1,
+                    'Nome': nome,
+                    'Email': email_raw,
+                    'Telefone': telefone,
+                    'Status': 'cadastrado',
+                    'Detalhe': 'Lead cadastrado e confirmado no Sigavi.',
+                })
+            else:
+                print(f"[ERRO] Salvar nao confirmou o cadastro de {nome} - {telefone}. Marcando para revisao.")
+                resultados_cadastro.append({
+                    'Linha': index + 1,
+                    'Nome': nome,
+                    'Email': email_raw,
+                    'Telefone': telefone,
+                    'Status': 'erro_cadastro',
+                    'Detalhe': f'Cadastro nao confirmado apos salvar: {detalhe_confirmacao}',
+                })
+            salvar_estado(index)
+            break
+    
+          except TimeoutException as e:
+            # Timeout de elemento NAO e browser caido (TimeoutException herda de
+            # WebDriverException) — sem este handler, qualquer elemento sumido
+            # da pagina derrubava e recriava o Edge a toa, mascarando o erro real
+            # como "Browser caiu" com Message vazio.
+            if tentativa_lead == 1:
+                print(f"[ERRO] Elemento nao apareceu no cadastro de {nome}: {e.msg or 'timeout'}. Tentando o lead de novo (2/2)...")
+                continue
+            print(f"[ERRO] Timeout de novo no lead {nome} na 2a tentativa. Pulando pro proximo.")
             resultados_cadastro.append({
                 'Linha': index + 1,
                 'Nome': nome,
                 'Email': email_raw,
                 'Telefone': telefone,
-                'Status': 'cadastrado',
-                'Detalhe': 'Lead cadastrado no Sigavi.',
+                'Status': 'erro_cadastro',
+                'Detalhe': f"Elemento nao encontrado na pagina (timeout apos 2 tentativas): {e.msg or 'timeout'}",
             })
-    
-        except (InvalidSessionIdException, WebDriverException) as e:
+            salvar_estado(index)
+          except (InvalidSessionIdException, WebDriverException) as e:
             print(f"[ERRO] Browser caiu — reconectando...")
             for tentativa_reconexao in range(3):
                 try:
@@ -1090,28 +1525,33 @@ try:
                 })
                 salvar_estado(index, anunciar=True)
                 raise SystemExit(1)
+            if tentativa_lead == 1:
+                print(f"Reconectado. Tentando o lead {nome} de novo (2/2)...")
+                continue
+            print(f"[ERRO] Browser caiu de novo no lead {nome}. Pulando pro proximo.")
             resultados_cadastro.append({
                 'Linha': index + 1,
                 'Nome': nome,
                 'Email': email_raw,
                 'Telefone': telefone,
                 'Status': 'erro_cadastro',
-                'Detalhe': f'Browser caiu durante cadastro: {e}',
+                'Detalhe': f'Browser caiu durante cadastro (2 tentativas): {e}',
             })
             salvar_estado(index)
-            continue
-        except Exception as e:
-            print(f"[ERRO] Falha ao cadastrar {nome}: {e}")
+          except Exception as e:
+            if tentativa_lead == 1:
+                print(f"[ERRO] Falha ao cadastrar {nome}: {e}. Tentando o lead de novo (2/2)...")
+                continue
+            print(f"[ERRO] Falha ao cadastrar {nome} na 2a tentativa: {e}. Pulando pro proximo.")
             resultados_cadastro.append({
                 'Linha': index + 1,
                 'Nome': nome,
                 'Email': email_raw,
                 'Telefone': telefone,
                 'Status': 'erro_cadastro',
-                'Detalhe': str(e),
+                'Detalhe': f'{e} (apos 2 tentativas)',
             })
             salvar_estado(index)
-            continue
     
         salvar_progresso(index, resultados_email, resultados_cadastro)
         if len(resultados_cadastro) % AUTOSAVE_EVERY == 0:
