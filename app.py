@@ -414,6 +414,64 @@ def run_automation(job_id, excel_path, result_dir, progress_file, stop_file, log
             shutil.rmtree(excel_path.parent, ignore_errors=True)
 
 
+def _iniciar_job(excel_bytes, display_name, mode, sigavi_login, sigavi_senha, headless, extra_logs=None):
+    """Cria o job, grava a planilha + backup e dispara a thread de execucao.
+
+    Compartilhado por /jobs (upload novo) e /jobs/<id>/reprocess (so as linhas
+    que falharam). Recebe os bytes do .xlsx ja prontos para servir de entrada.
+    """
+    secure_name = secure_filename(display_name) or "planilha.xlsx"
+    job_id = uuid.uuid4().hex
+    job_dir = UPLOAD_ROOT / job_id
+    job_dir.mkdir(parents=True, exist_ok=False)
+    backup_dir = BACKUP_ROOT / backup_slug(secure_name)
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    result_dir = backup_dir / "resultados"
+    result_dir.mkdir(exist_ok=False)
+    progress_file = backup_dir / "progresso.json"
+    stop_file = job_dir / "parar-e-salvar.flag"
+    log_path = backup_dir / "log.txt"
+    excel_path = job_dir / f"{job_id}_{secure_name}"
+    excel_path.write_bytes(excel_bytes)
+    shutil.copy2(excel_path, backup_dir / f"entrada_{secure_name}")
+
+    logs = [
+        f"Modo selecionado: {'Somente consulta' if mode == 'consulta' else 'Somente cadastro'}\n",
+        f"Planilha recebida: {display_name}\n",
+        f"Backup criado em: {backup_dir}\n",
+    ]
+    if extra_logs:
+        logs = list(extra_logs) + logs
+
+    with JOBS_LOCK:
+        JOBS[job_id] = {
+            "id": job_id,
+            "status": "queued",
+            "mode": mode,
+            "filename": display_name,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "started_at": None,
+            "finished_at": None,
+            "return_code": None,
+            "pid": None,
+            "backup_dir": str(backup_dir),
+            "stop_file": str(stop_file),
+            "download_available": False,
+            "result_files": [],
+            "result_deleted_at": None,
+            "progress": None,
+            "logs": logs,
+        }
+
+    thread = threading.Thread(
+        target=run_automation,
+        args=(job_id, excel_path, result_dir, progress_file, stop_file, log_path, mode, sigavi_login, sigavi_senha, headless),
+        daemon=True,
+    )
+    thread.start()
+    return job_id
+
+
 @app.get("/")
 def index():
     return render_template(
@@ -483,50 +541,9 @@ def create_job():
         requisito = "e-mail" if mode == "consulta" else "telefone valido"
         return jsonify({"error": f"A planilha nao possui nenhuma linha com {requisito}."}), 400
 
-    job_id = uuid.uuid4().hex
-    job_dir = UPLOAD_ROOT / job_id
-    job_dir.mkdir(parents=True, exist_ok=False)
-    backup_dir = BACKUP_ROOT / backup_slug(original_name)
-    backup_dir.mkdir(parents=True, exist_ok=False)
-    result_dir = backup_dir / "resultados"
-    result_dir.mkdir(exist_ok=False)
-    progress_file = backup_dir / "progresso.json"
-    stop_file = job_dir / "parar-e-salvar.flag"
-    log_path = backup_dir / "log.txt"
-    excel_path = job_dir / f"{job_id}_{original_name}"
-    upload.save(excel_path)
-    shutil.copy2(excel_path, backup_dir / f"entrada_{original_name}")
-
-    with JOBS_LOCK:
-        JOBS[job_id] = {
-            "id": job_id,
-            "status": "queued",
-            "mode": mode,
-            "filename": upload.filename,
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-            "started_at": None,
-            "finished_at": None,
-            "return_code": None,
-            "pid": None,
-            "backup_dir": str(backup_dir),
-            "stop_file": str(stop_file),
-            "download_available": False,
-            "result_files": [],
-            "result_deleted_at": None,
-            "progress": None,
-            "logs": [
-                f"Modo selecionado: {'Somente consulta' if mode == 'consulta' else 'Somente cadastro'}\n",
-                f"Planilha recebida: {upload.filename}\n",
-                f"Backup criado em: {backup_dir}\n",
-            ],
-        }
-
-    thread = threading.Thread(
-        target=run_automation,
-        args=(job_id, excel_path, result_dir, progress_file, stop_file, log_path, mode, sigavi_login, sigavi_senha, headless),
-        daemon=True,
-    )
-    thread.start()
+    upload.stream.seek(0)
+    excel_bytes = upload.read()
+    job_id = _iniciar_job(excel_bytes, upload.filename, mode, sigavi_login, sigavi_senha, headless)
 
     return jsonify({"job_id": job_id})
 
@@ -614,6 +631,88 @@ def download_result(job_id):
 @login_required
 def download_result_file(job_id, file_id):
     return _serve_result_file(job_id, file_id)
+
+
+@app.post("/jobs/<job_id>/reprocess")
+@login_required
+def reprocess_errors(job_id):
+    """Roda de novo apenas as linhas que falharam (erro_consulta/erro_cadastro).
+
+    Le o progresso salvo do job original, filtra a planilha de entrada (do backup)
+    pelas linhas com erro e inicia um novo job so com elas, no mesmo modo.
+    """
+    import pandas as pd
+
+    if not check_csrf():
+        return jsonify({"error": "Sessao expirada. Atualize a pagina."}), 400
+    if has_active_job():
+        return jsonify({"error": "Ja existe uma automacao em andamento."}), 409
+
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        snapshot = dict(job) if job else None
+    if not snapshot:
+        return jsonify({"error": "Execucao original nao encontrada."}), 404
+    if snapshot["status"] in RUNNING_STATUSES:
+        return jsonify({"error": "A execucao ainda esta rodando."}), 409
+
+    sigavi_login = request.form.get("sigavi_login", "").strip()
+    sigavi_senha = request.form.get("sigavi_senha", "")
+    headless = request.form.get("headless") == "on"
+    if not sigavi_login or not sigavi_senha:
+        return jsonify({"error": "Informe login e senha do Sigavi para reprocessar."}), 400
+
+    mode = snapshot.get("mode", "consulta")
+    status_erro = "erro_consulta" if mode == "consulta" else "erro_cadastro"
+    chave_resultados = "resultados_email" if mode == "consulta" else "resultados_cadastro"
+
+    backup_dir = Path(snapshot.get("backup_dir", ""))
+    progresso_path = backup_dir / "progresso.json"
+    if not progresso_path.exists():
+        return jsonify({"error": "Nao ha dados de progresso para reprocessar."}), 400
+
+    try:
+        dados = json.loads(progresso_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        return jsonify({"error": f"Nao foi possivel ler o progresso: {exc}"}), 400
+
+    linhas_erro = sorted(
+        {
+            r.get("Linha")
+            for r in dados.get(chave_resultados, [])
+            if r.get("Status") == status_erro and isinstance(r.get("Linha"), int)
+        }
+    )
+    if not linhas_erro:
+        return jsonify({"error": "Nenhum erro para reprocessar nesta execucao."}), 400
+
+    entradas = sorted(backup_dir.glob("entrada_*.xlsx"))
+    if not entradas:
+        return jsonify({"error": "Planilha de entrada do job original nao encontrada."}), 400
+
+    try:
+        excel_file = pd.ExcelFile(entradas[0])
+        sheet = excel_file.sheet_names[0]
+        df = excel_file.parse(sheet)
+    except Exception as exc:
+        return jsonify({"error": f"Nao foi possivel ler a planilha de entrada: {exc}"}), 400
+
+    # 'Linha' = index + 1 no confio.py, entao a posicao 0-based e (Linha - 1).
+    posicoes = [linha - 1 for linha in linhas_erro if 0 <= linha - 1 < len(df)]
+    if not posicoes:
+        return jsonify({"error": "As linhas com erro nao batem com a planilha original."}), 400
+
+    buffer = io.BytesIO()
+    df.iloc[posicoes].to_excel(buffer, index=False, sheet_name=str(sheet)[:31])
+    excel_bytes = buffer.getvalue()
+
+    display_name = f"reprocesso_{snapshot.get('filename', 'planilha.xlsx')}"
+    extra_logs = [f"Reprocessando {len(posicoes)} linha(s) com erro do job anterior.\n"]
+    novo_job_id = _iniciar_job(
+        excel_bytes, display_name, mode, sigavi_login, sigavi_senha, headless, extra_logs=extra_logs
+    )
+
+    return jsonify({"job_id": novo_job_id, "reprocessadas": len(posicoes)})
 
 
 @app.post("/preview")

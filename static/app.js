@@ -58,11 +58,14 @@ const resultSuccess = document.querySelector("#result-success");
 const resultPending = document.querySelector("#result-pending");
 const resultErrors = document.querySelector("#result-errors");
 const downloadList = document.querySelector("#download-list");
+const reprocessButton = document.querySelector("#reprocess-button");
+const reprocessMessage = document.querySelector("#reprocess-message");
 
 // Ações
 const actionsFeed = document.querySelector("#actions-feed");
 
 let currentJobId = null;
+let reprocessJobId = null;
 let pollTimer = null;
 let ignoradosPreview = 0;
 let previewValido = false;
@@ -421,6 +424,20 @@ function mostrarResultado(data) {
   resultErrors.textContent = erros;
 
   renderDownloads(data);
+
+  // Botao "Reprocessar so os erros": so faz sentido quando sobrou erro.
+  reprocessMessage.textContent = "";
+  reprocessMessage.className = "field-hint";
+  if (erros > 0 && currentJobId) {
+    reprocessJobId = currentJobId;
+    reprocessButton.textContent = `🔁 Reprocessar ${erros} erro(s)`;
+    reprocessButton.disabled = false;
+    reprocessButton.classList.remove("hidden");
+  } else {
+    reprocessJobId = null;
+    reprocessButton.classList.add("hidden");
+  }
+
   resultPanel.classList.remove("hidden");
 }
 
@@ -524,6 +541,48 @@ stopButton.addEventListener("click", async () => {
   }
 });
 
+// ===================== REPROCESSAR ERROS =====================
+reprocessButton.addEventListener("click", async () => {
+  if (!reprocessJobId || reprocessButton.disabled) return;
+
+  if (!loginInput.value.trim() || !senhaInput.value.trim()) {
+    reprocessMessage.textContent = "Preencha login e senha do Sigavi para reprocessar.";
+    reprocessMessage.className = "field-hint error";
+    return;
+  }
+
+  reprocessButton.disabled = true;
+  reprocessMessage.textContent = "Preparando reprocessamento...";
+  reprocessMessage.className = "field-hint";
+
+  const body = new FormData();
+  body.append("csrf_token", csrf());
+  body.append("sigavi_login", loginInput.value.trim());
+  body.append("sigavi_senha", senhaInput.value);
+  if (form.querySelector("[name='headless']").checked) body.append("headless", "on");
+
+  try {
+    const response = await fetch(`/jobs/${reprocessJobId}/reprocess`, { method: "POST", body });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Nao foi possivel reprocessar.");
+
+    // Comeca a acompanhar o novo job, como num submit normal.
+    window.clearTimeout(pollTimer);
+    resultPanel.classList.add("hidden");
+    reprocessJobId = null;
+    setBusy(true);
+    currentJobId = data.job_id;
+    jobIdLabel.textContent = `#${currentJobId.slice(0, 8)}`;
+    setStatus("Executando", "running");
+    logOutput.textContent = `Reprocessando ${data.reprocessadas} linha(s) com erro...\n`;
+    pollJob();
+  } catch (error) {
+    reprocessButton.disabled = false;
+    reprocessMessage.textContent = error.message;
+    reprocessMessage.className = "field-hint error";
+  }
+});
+
 // ===================== LIMPAR TELA =====================
 clearButton.addEventListener("click", () => {
   if (currentJobId) return; // não limpa durante execução
@@ -538,6 +597,9 @@ clearButton.addEventListener("click", () => {
   [metricProcessed, metricSuccess, metricPending, metricErrors, metricIgnored].forEach((el) => (el.textContent = "0"));
   metricProcessed.textContent = "0";
   resultPanel.classList.add("hidden");
+  reprocessButton.classList.add("hidden");
+  reprocessMessage.textContent = "";
+  reprocessJobId = null;
   actionsFeed.innerHTML = `<li class="action-empty">As ações aparecem aqui durante a execução.</li>`;
 });
 
