@@ -255,7 +255,7 @@ def _formatar_duracao(started_at, finished_at):
     return f"{seg}s"
 
 
-def montar_resumo(job, n_anexos=0):
+def montar_resumo(job, n_anexos=0, saudacao=False):
     progress = job.get("progress") or {}
     is_consulta = job.get("mode") == "consulta"
     titulo = {
@@ -280,8 +280,17 @@ def montar_resumo(job, n_anexos=0):
         hora = ""
 
     linha = "━━━━━━━━━━━━━━━"
-    partes = [
-        titulo,
+    if saudacao:
+        # Versao amigavel pro grupo do Marketing: apresentacao no lugar do titulo tecnico.
+        cabecalho = [
+            "👋 Olá! Tudo bem? Aqui é a *automação de importação de telefones e cadastro de leads*. 🤖",
+            "",
+            "Terminei de processar a planilha que me foi enviada — segue abaixo o resumo e as planilhas em anexo. 📎",
+            "",
+        ]
+    else:
+        cabecalho = [titulo]
+    partes = cabecalho + [
         linha,
         f"📄 {job.get('filename', '')}",
         f"⚙️ {'Consulta' if is_consulta else 'Cadastro'}   ·   ⏱️ {_formatar_duracao(job.get('started_at'), job.get('finished_at'))}",
@@ -298,6 +307,9 @@ def montar_resumo(job, n_anexos=0):
         partes.append(f"📎 {n_anexos} planilha(s) em anexo")
     if hora:
         partes.append(f"🕐 Concluído às {hora}")
+    if saudacao:
+        partes.append("")
+        partes.append("Qualquer coisa, é só chamar o Erick. 🙂")
     return "\n".join(partes)
 
 
@@ -313,7 +325,8 @@ def notificar_whatsapp(job_id, result_dir):
     arquivos = [entry["path"] for entry in result_file_entries(result_dir)]
     anexaveis = [a for a in arquivos if Path(a).exists() and Path(a).stat().st_size > 0]
     texto = montar_resumo(snapshot, n_anexos=len(anexaveis))
-    ok, msg = whatsapp.notificar(texto, arquivos)
+    texto_grupo = montar_resumo(snapshot, n_anexos=len(anexaveis), saudacao=True)
+    ok, msg = whatsapp.notificar(texto, arquivos, texto_grupo=texto_grupo)
     append_log(job_id, f"\n{msg}\n")
 
 
@@ -431,7 +444,10 @@ def _iniciar_job(excel_bytes, display_name, mode, sigavi_login, sigavi_senha, he
     progress_file = backup_dir / "progresso.json"
     stop_file = job_dir / "parar-e-salvar.flag"
     log_path = backup_dir / "log.txt"
-    excel_path = job_dir / f"{job_id}_{secure_name}"
+    # O job_dir ja e unico (UPLOAD_ROOT/job_id), entao o arquivo dentro dele nao
+    # precisa do prefixo do job_id. Sem ele, o nome do resultado sai limpo
+    # (ex.: resultado_New_Time_encontrados.xlsx em vez de resultado_<hash>_New_Time_...).
+    excel_path = job_dir / secure_name
     excel_path.write_bytes(excel_bytes)
     shutil.copy2(excel_path, backup_dir / f"entrada_{secure_name}")
 

@@ -46,6 +46,11 @@ def _destinos():
     return [n.strip() for n in bruto.split(",") if n.strip()]
 
 
+def _eh_grupo(destino):
+    """Grupos do WhatsApp terminam em @g.us; numeros individuais nao."""
+    return destino.strip().endswith("@g.us")
+
+
 def configurado():
     """True se todas as credenciais necessarias estao no ambiente."""
     return all([_url(), _key(), _instance(), _destinos()])
@@ -83,11 +88,14 @@ def enviar_arquivo(caminho, numero, legenda=""):
     resp.raise_for_status()
 
 
-def notificar(texto, arquivos=None):
+def notificar(texto, arquivos=None, texto_grupo=None):
     """Envia o resumo e anexa os arquivos. Retorna (ok, mensagem).
 
     Silencioso e seguro: se nao houver configuracao, apenas informa. Qualquer
     erro de rede e capturado para nao derrubar a automacao.
+
+    Se `texto_grupo` for informado, os destinos que forem GRUPO (@g.us) recebem
+    essa versao (com saudacao, pro Marketing) e os numeros recebem `texto`.
     """
     if not configurado():
         return False, "WhatsApp nao configurado (.env) — notificacao ignorada."
@@ -100,8 +108,9 @@ def notificar(texto, arquivos=None):
     # Cada destinatario e cada anexo vao de forma independente: se um falhar,
     # os demais ainda vao. A pausa curta entre envios evita throttle do Baileys.
     for numero in destinos:
+        msg = texto_grupo if (texto_grupo and _eh_grupo(numero)) else texto
         try:
-            enviar_texto(texto, numero)
+            enviar_texto(msg, numero)
         except Exception as exc:
             falhas.append(f"resumo para {numero} ({exc})")
             continue
