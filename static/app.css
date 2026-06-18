@@ -502,16 +502,34 @@ h2 { font-size: 18px; }
 .text-muted { color: var(--muted); }
 
 /* ===================== RESPONSIVO ===================== */
-@media (max-width: 880px) {
+/* Tablet / janela estreita: o painel de trabalho empilha (lado esquerdo tem min 300px) */
+@media (max-width: 960px) {
   .workspace { grid-template-columns: 1fr; }
   .metrics-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
-@media (max-width: 560px) {
+/* Celular */
+@media (max-width: 600px) {
   body { font-size: 14px; }
-  .topbar { align-items: flex-start; flex-direction: column; }
+  h1 { font-size: 22px; }
+  .login-page, .app-shell { width: calc(100vw - 24px); }
+  .topbar { align-items: flex-start; flex-direction: column; gap: 12px; padding: 18px 0 14px; }
+  .panel { padding: 16px; }
+  .login-box { padding: 22px; }
   .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metrics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .result-numbers { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .panel { padding: 18px; }
+  .progress-top { flex-direction: column; align-items: flex-start; gap: 2px; }
+  .progress-percent { font-size: 26px; }
+  .progress-meta { flex-direction: column; gap: 4px; }
+}
+
+/* Celular pequeno: evita apertar — grids viram 1 coluna */
+@media (max-width: 380px) {
+  h1 { font-size: 20px; }
+  .panel { padding: 13px; }
+  .summary-grid,
+  .metrics-grid,
+  .result-numbers { grid-template-columns: 1fr; }
+  .metrics-grid strong { font-size: 20px; }
 }
