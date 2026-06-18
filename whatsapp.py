@@ -56,6 +56,12 @@ def configurado():
     return all([_url(), _key(), _instance(), _destinos()])
 
 
+def credenciais_ok():
+    """True se a URL/chave/instancia estao configuradas (sem exigir destino fixo:
+    os destinos podem vir escolhidos na tela)."""
+    return all([_url(), _key(), _instance()])
+
+
 def _headers():
     return {"apikey": _key(), "Content-Type": "application/json"}
 
@@ -88,7 +94,7 @@ def enviar_arquivo(caminho, numero, legenda=""):
     resp.raise_for_status()
 
 
-def notificar(texto, arquivos=None, texto_grupo=None):
+def notificar(texto, arquivos=None, texto_grupo=None, destinos=None):
     """Envia o resumo e anexa os arquivos. Retorna (ok, mensagem).
 
     Silencioso e seguro: se nao houver configuracao, apenas informa. Qualquer
@@ -97,11 +103,15 @@ def notificar(texto, arquivos=None, texto_grupo=None):
     Se `texto_grupo` for informado, os destinos que forem GRUPO (@g.us) recebem
     essa versao (com saudacao, pro Marketing) e os numeros recebem `texto`.
     """
-    if not configurado():
+    if not credenciais_ok():
         return False, "WhatsApp nao configurado (.env) — notificacao ignorada."
 
     candidatos = [a for a in (arquivos or []) if Path(a).exists() and Path(a).stat().st_size > 0]
-    destinos = _destinos()
+    # destinos explicitos (escolhidos na tela) tem prioridade; senao usa o .env.
+    origem = destinos if destinos is not None else _destinos()
+    destinos = [d.strip() for d in origem if d and d.strip()]
+    if not destinos:
+        return False, "Nenhum destino de WhatsApp selecionado — notificacao ignorada."
     destinos_ok = 0
     falhas = []
 

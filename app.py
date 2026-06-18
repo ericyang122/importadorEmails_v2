@@ -31,6 +31,37 @@ load_dotenv(BASE_DIR / ".env")
 UPLOAD_ROOT.mkdir(exist_ok=True)
 BACKUP_ROOT.mkdir(exist_ok=True)
 
+DESTINOS_FILE = BASE_DIR / "destinos.json"
+
+
+def carregar_destinos():
+    """Lista curada de destinos do WhatsApp (nome + id), lida de destinos.json.
+
+    Se o arquivo nao existir/for invalido, cai nos numeros do WHATSAPP_DESTINO
+    (.env), sem nome amigavel. Cada item: {nome, id, padrao}.
+    """
+    try:
+        dados = json.loads(DESTINOS_FILE.read_text(encoding="utf-8"))
+        destinos = []
+        for item in dados:
+            wid = str(item.get("id", "")).strip()
+            if wid:
+                destinos.append({
+                    "nome": str(item.get("nome", "")).strip() or wid,
+                    "id": wid,
+                    "padrao": bool(item.get("padrao", False)),
+                })
+        return destinos
+    except (OSError, ValueError):
+        brutos = [n.strip() for n in os.getenv("WHATSAPP_DESTINO", "").split(",") if n.strip()]
+        return [{"nome": n, "id": n, "padrao": True} for n in brutos]
+
+
+def validar_destinos(ids):
+    """Mantem so os ids que existem na lista curada (allowlist), sem duplicar."""
+    permitidos = {d["id"] for d in carregar_destinos()}
+    return [i for i in dict.fromkeys(ids) if i in permitidos]
+
 app = Flask(__name__)
 app.secret_key = os.getenv("APP_SECRET_KEY") or secrets.token_hex(32)
 app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_UPLOAD_MB", "25")) * 1024 * 1024
@@ -315,7 +346,7 @@ def montar_resumo(job, n_anexos=0, saudacao=False):
 
 def notificar_whatsapp(job_id, result_dir):
     """Envia o resumo + planilhas pelo WhatsApp ao fim do job (se configurado)."""
-    if not whatsapp.configurado():
+    if not whatsapp.credenciais_ok():
         return
     with JOBS_LOCK:
         job = JOBS.get(job_id)
@@ -326,7 +357,9 @@ def notificar_whatsapp(job_id, result_dir):
     anexaveis = [a for a in arquivos if Path(a).exists() and Path(a).stat().st_size > 0]
     texto = montar_resumo(snapshot, n_anexos=len(anexaveis))
     texto_grupo = montar_resumo(snapshot, n_anexos=len(anexaveis), saudacao=True)
-    ok, msg = whatsapp.notificar(texto, arquivos, texto_grupo=texto_grupo)
+    # Destinos escolhidos na tela; se vazio (ex.: JS falhou), cai no .env (seguro).
+    destinos = snapshot.get("destinos") or None
+    ok, msg = whatsapp.notificar(texto, arquivos, texto_grupo=texto_grupo, destinos=destinos)
     append_log(job_id, f"\n{msg}\n")
 
 
@@ -427,7 +460,7 @@ def run_automation(job_id, excel_path, result_dir, progress_file, stop_file, log
             shutil.rmtree(excel_path.parent, ignore_errors=True)
 
 
-def _iniciar_job(excel_bytes, display_name, mode, sigavi_login, sigavi_senha, headless, extra_logs=None):
+def _iniciar_job(excel_bytes, display_name, mode, sigavi_login, sigavi_senha, headless, destinos=None, extra_logs=None):
     """Cria o job, grava a planilha + backup e dispara a thread de execucao.
 
     Compartilhado por /jobs (upload novo) e /jobs/<id>/reprocess (so as linhas
@@ -472,6 +505,7 @@ def _iniciar_job(excel_bytes, display_name, mode, sigavi_login, sigavi_senha, he
             "pid": None,
             "backup_dir": str(backup_dir),
             "stop_file": str(stop_file),
+            "destinos": list(destinos or []),
             "download_available": False,
             "result_files": [],
             "result_deleted_at": None,
@@ -495,6 +529,13 @@ def index():
         authenticated=session.get("authenticated", False),
         login_error=request.args.get("login_error"),
     )
+
+
+@app.get("/destinos")
+@login_required
+def listar_destinos():
+    """Lista curada de destinos pro front montar os checkboxes 'Enviar para'."""
+    return jsonify({"destinos": carregar_destinos()})
 
 
 @app.post("/login")
@@ -535,6 +576,7 @@ def create_job():
     upload = request.files.get("planilha")
     headless = request.form.get("headless") == "on"
     mode = request.form.get("mode", "consulta")
+    destinos = validar_destinos(request.form.getlist("destinos"))
 
     if not sigavi_login or not sigavi_senha:
         return jsonify({"error": "Informe login e senha do Sigavi."}), 400
@@ -559,7 +601,7 @@ def create_job():
 
     upload.stream.seek(0)
     excel_bytes = upload.read()
-    job_id = _iniciar_job(excel_bytes, upload.filename, mode, sigavi_login, sigavi_senha, headless)
+    job_id = _iniciar_job(excel_bytes, upload.filename, mode, sigavi_login, sigavi_senha, headless, destinos=destinos)
 
     return jsonify({"job_id": job_id})
 
@@ -725,7 +767,8 @@ def reprocess_errors(job_id):
     display_name = f"reprocesso_{snapshot.get('filename', 'planilha.xlsx')}"
     extra_logs = [f"Reprocessando {len(posicoes)} linha(s) com erro do job anterior.\n"]
     novo_job_id = _iniciar_job(
-        excel_bytes, display_name, mode, sigavi_login, sigavi_senha, headless, extra_logs=extra_logs
+        excel_bytes, display_name, mode, sigavi_login, sigavi_senha, headless,
+        destinos=snapshot.get("destinos"), extra_logs=extra_logs
     )
 
     return jsonify({"job_id": novo_job_id, "reprocessadas": len(posicoes)})

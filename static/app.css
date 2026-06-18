@@ -201,6 +201,12 @@ h2 { font-size: 18px; }
 .mode-card strong { font-size: 14px; margin-bottom: 4px; }
 .mode-card small { color: var(--muted); font-size: 12.5px; font-weight: 600; line-height: 1.4; }
 
+.destinos-group { display: grid; gap: 8px; border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin: 4px 0; }
+.destinos-group legend { font-weight: 800; font-size: 13px; padding: 0 6px; }
+.destinos-list { display: grid; gap: 8px; }
+.destino-item { cursor: pointer; }
+.destino-item span { font-weight: 600; }
+
 .action-row { display: grid; gap: 10px; }
 .danger-button { background: var(--danger); }
 .danger-button:hover { background: var(--danger-hover); }

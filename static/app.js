@@ -603,6 +603,48 @@ clearButton.addEventListener("click", () => {
   actionsFeed.innerHTML = `<li class="action-empty">As ações aparecem aqui durante a execução.</li>`;
 });
 
+// ===================== DESTINOS (enviar relatório para) =====================
+async function carregarDestinos() {
+  const container = document.querySelector("#destinos-list");
+  if (!container) return;
+  try {
+    const resp = await fetch("/destinos");
+    if (!resp.ok) throw new Error("falha");
+    const data = await resp.json();
+    const destinos = data.destinos || [];
+    container.innerHTML = "";
+    if (!destinos.length) {
+      const p = document.createElement("p");
+      p.className = "field-hint";
+      p.textContent = "Nenhum destino configurado.";
+      container.appendChild(p);
+      return;
+    }
+    destinos.forEach((d) => {
+      const ehGrupo = String(d.id).endsWith("@g.us");
+      const label = document.createElement("label");
+      label.className = "checkbox-row destino-item";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.name = "destinos";
+      input.value = d.id;
+      if (d.padrao) input.checked = true;
+      const span = document.createElement("span");
+      span.textContent = `${ehGrupo ? "👥" : "📱"} ${d.nome}`;
+      label.appendChild(input);
+      label.appendChild(span);
+      container.appendChild(label);
+    });
+  } catch (e) {
+    container.innerHTML = "";
+    const p = document.createElement("p");
+    p.className = "field-hint";
+    p.textContent = "Não foi possível carregar os destinos.";
+    container.appendChild(p);
+  }
+}
+
 // ===================== INICIALIZAÇÃO =====================
 aplicarModo();
 refreshSubmitState();
+carregarDestinos();
