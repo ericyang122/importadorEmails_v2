@@ -213,14 +213,19 @@ def _resultado_file(sufixo):
 # CHROME + HELPERS
 # =========================
 def criar_driver():
-    options = webdriver.EdgeOptions()
+    # Navegador configuravel: SIGAVI_BROWSER=edge (default, Windows) ou chrome (Linux/VM).
+    browser = os.getenv("SIGAVI_BROWSER", "edge").strip().lower()
+    usa_chrome = browser in {"chrome", "chromium"}
+
+    options = webdriver.ChromeOptions() if usa_chrome else webdriver.EdgeOptions()
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     if HEADLESS:
         options.add_argument("--headless=new")
         options.add_argument("--window-size=1920,1080")
-    d = webdriver.Edge(options=options)
+
+    d = webdriver.Chrome(options=options) if usa_chrome else webdriver.Edge(options=options)
     if HEADLESS:
         d.set_window_size(1920, 1080)
     else:

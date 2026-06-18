@@ -285,8 +285,9 @@ Compatível com Evolution API v2 (`/message/sendText` e `/message/sendMedia`).
 
 ## 13. Roadmap
 
-- [ ] **nº 7** — botão "reprocessar erros" (rodar de novo só as linhas que falharam)
-- [ ] **nº 3** — centralizar os XPaths do Sigavi num lugar só (robustez)
+- [x] **nº 7** — botão "reprocessar erros" (rodar de novo só as linhas que falharam) ✅ feito (commit 8a96d3d: backend `/jobs/<id>/reprocess` + botão no front)
+- [ ] **nº 3** — centralizar os XPaths do Sigavi num lugar só (robustez) — ⚠️ refatoração grande (62 XPaths), fazer COM teste contra o Sigavi
 - [ ] **nº 4** — refatorar `confio.py` em funções
+- [ ] **nº 8** — CSS responsivo: modelo pra celular (mobile-friendly)
 - [ ] Subir a versão pra branch `main` (hoje o trabalho está em `teste-automacao`)
-- [ ] Deploy: link público via **ngrok** (número da empresa) → depois VM/Azure pra rodar 24/7
+- [ ] Deploy: VM **Ubuntu Server** 24/7 (ver `DEPLOY_VM.md`) — antes era via ngrok
