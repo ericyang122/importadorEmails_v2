@@ -800,72 +800,86 @@ def normalizar_texto(valor: str) -> str:
     apenas_alfa = re.sub(r'[^A-Z0-9]+', ' ', upper)
     return re.sub(r'\s+', ' ', apenas_alfa).strip()
 
-def selecionar_midia_por_posicao(posicao: int):
-    ac = ActionChains(driver)
-    for _ in range(posicao):
-        ac.send_keys(Keys.ARROW_DOWN)
-    ac.send_keys(Keys.ENTER)
-    ac.perform()
+def _itens_combo_kendo_visiveis():
+    """Retorna [(texto, elemento)] dos <li> visiveis de um combo Kendo aberto."""
+    seletores = 'ul.k-list li, li.k-list-item, li.k-item, ul[role="listbox"] li'
+    itens = []
+    for li in driver.find_elements(By.CSS_SELECTOR, seletores):
+        try:
+            if not li.is_displayed():
+                continue
+            txt = (li.text or '').strip()
+            if txt:
+                itens.append((txt, li))
+        except Exception:
+            continue
+    return itens
 
-midia_mapeamentos_brutos = [
-    ("123I", 1),
-    ("APTO.VC", 2),
-    ("CARTEIRA", 3),
-    ("CHAVES NA MAO", 4),
-    ("CHAVES NA MÃO", 4),
-    ("FACEBOOK", 5),
-    ("FORMULARIO GOOGLE", 6),
-    ("FORMULÁRIO GOOGLE", 6),
-    ("GOOGLE DISPLAY", 7),
-    ("GOOGLE SEARCH", 8),
-    ("IMOVEL WEB", 9),
-    ("IMÓVEL WEB", 9),
-    ("INCORPORADOR", 11),
-    ("INDICACAO", 12),
-    ("INDICAÇÃO", 12),
-    ("IND. CORRETOR", 12),
-    ("IND CORRETOR", 12),
-    ("INSTAGRAM", 13),
-    ("LINKEDIN", 14),
-    ("OLX", 15),
-    ("OUTROS", 16),
-    ("PADARIA", 17),
-    ("PLACA", 18),
-    ("RD STATION", 19),
-    ("RETORNO", 20),
-    ("SITE", 21),
-    ("VISITACAO", 21),
-    ("VISITAÇÃO", 21),
-    ("STAND", 21),
-    ("ACAO DE RUA", 21),
-    ("AÇÃO DE RUA", 21),
-    ("STAND/ACAO DE RUA", 21),
-    ("STAND/AÇÃO DE RUA", 21),
-    ("TWITTER", 23),
-    ("VIVA REAL", 24),
-    ("VIZINHO", 25),
-    ("WHATSAPP", 26),
-    ("YOUTUBE", 27),
-    ("ZAP", 28),
-    # Base Cora
-    ("VISITA DIRETA AO STANDE", 21),
-    ("SITE FORMULARIO", 21),
-    ("TELEFONE", 16),
-    ("CORA PINHEIROS", 16),
-]
 
-midia_por_tipo_plantao = {}
-for chave, posicao in midia_mapeamentos_brutos:
-    chave_norm = normalizar_texto(chave)
-    if chave_norm not in midia_por_tipo_plantao:
-        midia_por_tipo_plantao[chave_norm] = posicao
+def selecionar_kendo_por_texto(combo_locator, candidatos, default_texto=None):
+    """Abre o combo Kendo (span) e clica no item que casa com algum candidato.
 
-canal_plantao_tipos = {
-    normalizar_texto("VISITACAO"),
-    normalizar_texto("VISITAÇÃO"),
-    normalizar_texto("RETORNO"),
-    normalizar_texto("VISITA DIRETA AO STANDE"),
+    Le a lista de opcoes AO VIVO do Sigavi, entao nao quebra quando a ordem
+    muda (era o bug do 'tudo OLX': contar setas por posicao fixa desalinhava
+    sempre que o Sigavi adicionava uma midia nova no topo/meio da lista).
+    Casa por: (1) igualdade normalizada, (2) substring sem espaco (planilha
+    'PLACAS' -> opcao 'Placa', 'WHATS APP' -> 'WhatsApp'). Se nada casar, cai
+    no default_texto (ex.: 'Outros'). Retorna o texto escolhido, ou None."""
+    safe_click(combo_locator)
+    pausa_cadastro(0.8)
+    itens = _itens_combo_kendo_visiveis()
+    if not itens:
+        return None
+    por_norm = {}
+    for txt, li in itens:
+        por_norm.setdefault(normalizar_texto(txt), (txt, li))
+
+    cands = [c for c in candidatos if c and str(c).strip()]
+    # 1. igualdade normalizada
+    for c in cands:
+        cn = normalizar_texto(c)
+        if cn in por_norm:
+            txt, li = por_norm[cn]
+            scroll_into_view(li); li.click()
+            return txt
+    # 2. substring sem espaco (nos dois sentidos)
+    for c in cands:
+        cj = normalizar_texto(c).replace(' ', '')
+        if not cj:
+            continue
+        for tn, (txt, li) in por_norm.items():
+            tj = tn.replace(' ', '')
+            if tj and (tj in cj or cj in tj):
+                scroll_into_view(li); li.click()
+                return txt
+    # 3. default
+    if default_texto:
+        dn = normalizar_texto(default_texto)
+        if dn in por_norm:
+            txt, li = por_norm[dn]
+            scroll_into_view(li); li.click()
+            return txt
+    return None
+
+
+def canal_por_tipo(tipo_norm):
+    """Canal de Atendimento a partir do TIPO da planilha: indicacao/carteira
+    => 'Carteira'; visita/retorno/ligacao/demais => 'Plantao de Vendas'."""
+    if tipo_norm and ('INDICACAO' in tipo_norm or 'CARTEIRA' in tipo_norm
+                      or tipo_norm in canal_carteira_tipos):
+        return "Carteira"
+    return "Plantão de Vendas"
+
+
+# Ajustes de midia: valores da planilha que precisam de um empurrao pra casar
+# com a lista do Sigavi (o resto resolve sozinho por substring). O que nao
+# bater nem aqui nem na lista cai em MIDIA_DEFAULT.
+MIDIA_AJUSTES = {
+    normalizar_texto("WHATS APP"): "WhatsApp",
+    normalizar_texto("INDICACAO FAMILIA AMIGO"): "Indicação",
+    normalizar_texto("INDICACAO DO CORRETOR"): "Indicação",
 }
+MIDIA_DEFAULT = "Outros"
 
 canal_carteira_tipos = {                                        
     normalizar_texto("INDICACAO"),
@@ -1198,9 +1212,17 @@ try:
         corretor_original_raw = str(row.get('CORRETOR DE ORIGEM') or '')
         corretor_original_norm = re.sub(r'\s+', ' ', corretor_original_raw).strip().upper()
     
-        tipo_plantao_raw = str(row.get('TIPO PLANTAO') or '').strip()
+        # Canal e Midia saem da PROPRIA planilha (nao mais derivados so do TIPO):
+        #  - Canal de Atendimento: vem do TIPO (indicacao=Carteira; resto=Plantao)
+        #  - Midia: vem da coluna MIDIA da planilha. Antes a midia era chutada a
+        #    partir do TIPO e, como a coluna lida ('TIPO PLANTAO') nem existia,
+        #    caia sempre no default -> dava 'tudo OLX'.
+        tipo_plantao_raw = str(row.get('TIPO PLANTAO') or row.get('TIPO') or '').strip()
         tipo_plantao_norm = normalizar_texto(tipo_plantao_raw)
-        posicao_midia = midia_por_tipo_plantao.get(tipo_plantao_norm, 16)  # default: Outros
+        canal_atendimento = canal_por_tipo(tipo_plantao_norm)
+        midia_raw = str(row.get('MIDIA') or row.get('MÍDIA') or '').strip()
+        midia_norm = normalizar_texto(midia_raw)
+        midia_candidatos = [MIDIA_AJUSTES.get(midia_norm), midia_raw]
 
         # Regra de negocio (igual a automacao do Pedro/automa-o_abyara): a
         # equipe SEMPRE sai do corretores.json a partir do CORRETOR DE ORIGEM
@@ -1242,11 +1264,6 @@ try:
                 gerente = candidatas[0]
             elif len(candidatas) > 1:
                 print(f"Equipe '{gerente}' bate com varias do corretores.json ({', '.join(candidatas[:4])}); mantendo como veio.")
-    
-        canal_setas = 4 if tipo_plantao_norm in canal_plantao_tipos else 1
-        if tipo_plantao_norm in canal_carteira_tipos:
-            canal_setas = 1
-    
     
         # Cada lead tem ate 2 tentativas completas: se falhar no meio (combo,
         # modal, crash do browser), roda o lead de novo uma vez; persistindo o
@@ -1365,20 +1382,18 @@ try:
             safe_click((By.XPATH, '/html/body/div[2]/form/div[2]/div/div/div[1]/div[2]/div[1]/div/table/tbody/tr/td[4]/a[1]/span'))
             pausa_cadastro(1)
     
-            # Canal (SMS)
-            sms_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[3]/div/div/div[1]/div[1]/div[1]/div[1]/div[1]/span[2]/span/span[1]')
-            safe_click(sms_combo_locator)
-            ac_canal = ActionChains(driver)
-            for _ in range(canal_setas):
-                ac_canal.send_keys(Keys.ARROW_DOWN)
-            ac_canal.send_keys(Keys.ENTER).perform()
+            # Canal de Atendimento (selecionado pelo TEXTO, lendo a lista do Sigavi)
+            canal_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[3]/div/div/div[1]/div[1]/div[1]/div[1]/div[1]/span[2]/span/span[1]')
+            canal_escolhido = selecionar_kendo_por_texto(
+                canal_combo_locator, [canal_atendimento], default_texto="Plantão de Vendas")
+            print(f"Canal de Atendimento: pediu '{canal_atendimento}' -> selecionou '{canal_escolhido}'")
             pausa_cadastro(1)
 
-            # Mídia
+            # Mídia (vem da coluna MIDIA da planilha; seleciona pelo TEXTO)
             midia_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[3]/div/div/div[1]/div[1]/div[1]/div[1]/div[2]/span[2]/span/span[1]')
-            safe_click(midia_combo_locator)
-            # seleciona conforme TIPO PLANTAO
-            selecionar_midia_por_posicao(posicao_midia)
+            midia_escolhida = selecionar_kendo_por_texto(
+                midia_combo_locator, midia_candidatos, default_texto=MIDIA_DEFAULT)
+            print(f"Midia: planilha '{midia_raw or '(vazio)'}' -> selecionou '{midia_escolhida}'")
             pausa_cadastro(1)
 
             # Equipe (gerente) — seleciona digitando e CONFERE se realmente pegou.
