@@ -92,6 +92,10 @@ from selenium.common.exceptions import (
     WebDriverException,
 )
 
+# Seletores/XPaths do Sigavi centralizados (ver seletores.py): quando a tela
+# do Sigavi muda, o ajuste e la, nao espalhado por este arquivo.
+from seletores import Login, Combo, BuscaFac, Cadastro
+
 BASE_URL = "https://abyara.sigavi360.com.br"
 # Quantas buscas por email rodam em paralelo no modo consulta.
 # 8 e o padrao; o retry anti-throttle recupera respostas vazias, entao nao
@@ -250,13 +254,13 @@ def reconectar_browser():
     driver.get("https://abyara.sigavi360.com.br/Acesso/Login?ReturnUrl=%2F")
     time.sleep(4)
     WebDriverWait(driver, 30).until(
-        EC.visibility_of_element_located((By.XPATH, "/html/body/div[2]/section/div[1]/div/div/div/form/div[1]/div[1]/div/input"))   
+        EC.visibility_of_element_located(Login.USUARIO)
     ).send_keys(SIGAVI_LOGIN)
     WebDriverWait(driver, 30).until(
-        EC.visibility_of_element_located((By.XPATH, "/html/body/div[2]/section/div[1]/div/div/div/form/div[1]/div[2]/div/input"))
+        EC.visibility_of_element_located(Login.SENHA)
     ).send_keys(SIGAVI_SENHA)
     WebDriverWait(driver, 30).until(
-        EC.element_to_be_clickable((By.XPATH, "/html/body/div[2]/section/div[1]/div/div/div/form/div[1]/div[3]/div/button"))
+        EC.element_to_be_clickable(Login.ENTRAR)
     ).click()
     time.sleep(3)
     print("Reconectado e logado com sucesso.")
@@ -299,11 +303,11 @@ def relogar_sigavi():
     print("Sessao do Sigavi caiu (redirecionado pro login). Relogando...")
     driver.get("https://abyara.sigavi360.com.br/Acesso/Login?ReturnUrl=%2F")
     time.sleep(3)
-    wait_visible((By.XPATH, "/html/body/div[2]/section/div[1]/div/div/div/form/div[1]/div[1]/div/input"), timeout=30)\
+    wait_visible(Login.USUARIO, timeout=30)\
         .send_keys(SIGAVI_LOGIN)
-    wait_visible((By.XPATH, "/html/body/div[2]/section/div[1]/div/div/div/form/div[1]/div[2]/div/input"), timeout=30)\
+    wait_visible(Login.SENHA, timeout=30)\
         .send_keys(SIGAVI_SENHA)
-    safe_click((By.XPATH, "/html/body/div[2]/section/div[1]/div/div/div/form/div[1]/div[3]/div/button"))
+    safe_click(Login.ENTRAR)
     time.sleep(3)
     driver.get(BASE_URL + "/")
     time.sleep(2)
@@ -363,11 +367,7 @@ def dropdowns_combo_visiveis():
     """)
 
 def input_combo_aberto(timeout=8):
-    locators = [
-        (By.XPATH, "//div[contains(@class, 'select2-drop') and not(contains(@style, 'display: none'))]//input"),
-        (By.XPATH, "//span[contains(@class, 'select2-container--open')]//input"),
-        (By.XPATH, "//input[contains(@class, 'select2-input') or contains(@class, 'select2-search__field')]"),
-    ]
+    locators = Combo.INPUT_ABERTO
     fim = time.time() + timeout
     while time.time() < fim:
         elementos = elementos_visiveis(locators)
@@ -378,12 +378,7 @@ def input_combo_aberto(timeout=8):
 
 def clicar_opcao_combo(valor, timeout=8):
     valor_norm = normalizar_texto(valor)
-    locators = [
-        (By.XPATH, "//*[contains(@class, 'select2-result-label')]"),
-        (By.XPATH, "//*[contains(@class, 'select2-results__option')]"),
-        (By.XPATH, "//*[contains(@class, 'select2-result') and not(contains(@class, 'select2-searching'))]"),
-        (By.XPATH, "//*[@role='option']"),
-    ]
+    locators = Combo.OPCOES
     fim = time.time() + timeout
     for dropdown in dropdowns_combo_visiveis():
         try:
@@ -414,7 +409,7 @@ def clicar_opcao_combo(valor, timeout=8):
             return True
         for dropdown in dropdowns_combo_visiveis():
             try:
-                candidatos = dropdown.find_elements(By.XPATH, ".//*[self::li or self::div or self::span or self::a][normalize-space()]")
+                candidatos = dropdown.find_elements(By.XPATH, Combo.DROPDOWN_CANDIDATOS)
                 for el in candidatos:
                     try:
                         if not el.is_displayed():
@@ -523,14 +518,7 @@ def preencher_input_visivel(locators, valor, nome_campo, tentativas=3):
     return False
 
 def clicar_buscar_fac():
-    buscar_locators = [
-        (By.XPATH, "//button[contains(normalize-space(.), 'Buscar')]"),
-        (By.XPATH, "//a[contains(normalize-space(.), 'Buscar')]"),
-        (By.XPATH, "//*[self::button or self::a][contains(@title, 'Buscar')]"),
-        (By.XPATH, "//*[self::button or self::a][contains(@class, 'btn') and .//*[contains(@class, 'search')]]"),
-        (By.XPATH, "/html/body/section/section/div/div/div[2]/div/div[1]/form/div[4]/div/button[2]"),
-    ]
-    el = primeiro_elemento_visivel(buscar_locators, timeout=10)
+    el = primeiro_elemento_visivel(BuscaFac.BUSCAR, timeout=10)
     scroll_into_view(el)
     try:
         el.click()
@@ -539,7 +527,7 @@ def clicar_buscar_fac():
 
 def resumo_resultado_busca():
     texto_pagina = (driver.find_element(By.TAG_NAME, 'body').text or '').strip()
-    linhas = driver.find_elements(By.XPATH, "//div[contains(., 'RESULTADO DA BUSCA')]/following::table[1]//tbody/tr")
+    linhas = driver.find_elements(*BuscaFac.RESULTADO_LINHAS)
     linhas_texto = []
     for linha in linhas:
         texto = (linha.text or '').strip()
@@ -562,14 +550,7 @@ def aguardar_resultado_busca(timeout=6):
 
 def telefone_existe_no_sigavi(telefone, tentativas=3):
     """Confirma na busca do Fac se o telefone realmente entrou no Sigavi."""
-    telefone_busca_locators = [
-        (By.XPATH, "//input[contains(translate(@placeholder, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'telefone')]"),
-        (By.XPATH, "//input[contains(translate(@name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'telefone')]"),
-        (By.XPATH, "//input[contains(translate(@id, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'telefone')]"),
-        (By.XPATH, "//label[contains(normalize-space(.), 'Telefone')]/following::input[1]"),
-        (By.XPATH, '/html/body/section/section/div/div/div[2]/div/div[1]/form/div[3]/div/div[3]/input'),
-        (By.XPATH, '/html/body/section/section/div/div/div[2]/div/div[1]/form/div[2]/div/div/div/div[10]/div[4]/input'),
-    ]
+    telefone_busca_locators = BuscaFac.TELEFONE
     telefone_digits = re.sub(r'\D', '', str(telefone))
     for tentativa in range(1, tentativas + 1):
         try:
@@ -826,9 +807,8 @@ def normalizar_texto(valor: str) -> str:
 
 def _itens_combo_kendo_visiveis():
     """Retorna [(texto, elemento)] dos <li> visiveis de um combo Kendo aberto."""
-    seletores = 'ul.k-list li, li.k-list-item, li.k-item, ul[role="listbox"] li'
     itens = []
-    for li in driver.find_elements(By.CSS_SELECTOR, seletores):
+    for li in driver.find_elements(By.CSS_SELECTOR, Combo.KENDO_ITENS):
         try:
             if not li.is_displayed():
                 continue
@@ -919,11 +899,11 @@ canal_carteira_tipos = {
 driver.get("https://abyara.sigavi360.com.br/Acesso/Login?ReturnUrl=%2F")
 time.sleep(2)
 
-wait_visible((By.XPATH, "/html/body/div[2]/section/div[1]/div/div/div/form/div[1]/div[1]/div/input"))\
+wait_visible(Login.USUARIO)\
     .send_keys(SIGAVI_LOGIN)
-wait_visible((By.XPATH, "/html/body/div[2]/section/div[1]/div/div/div/form/div[1]/div[2]/div/input"))\
+wait_visible(Login.SENHA)\
     .send_keys(SIGAVI_SENHA)
-safe_click((By.XPATH, "/html/body/div[2]/section/div[1]/div/div/div/form/div[1]/div[3]/div/button"))
+safe_click(Login.ENTRAR)
 
 # =========================
 # VALIDA O LOGIN (melhoria nº 8)
@@ -1330,7 +1310,7 @@ try:
         for tentativa_lead in (1, 2):
           try:
             # Página de busca (apenas preenche telefone; não valida duplicidade aqui)
-            telefone_busca_locator = (By.XPATH, '/html/body/section/section/div/div/div[2]/div/div[1]/form/div[2]/div/div/div/div[10]/div[4]/input')
+            telefone_busca_locator = BuscaFac.TELEFONE_INPUT_ABS
             telefone_elem_busca = None
             for tentativa in range(3):
                 if parada_solicitada():
@@ -1381,12 +1361,12 @@ try:
             # dispara busca e verifica duplicidade antes de ir para cadastro
             ActionChains(driver).send_keys(Keys.ENTER).perform()
             pausa_cadastro(2.5)  # aguarda carregamento da grade de resultados
-            resultado_busca_locator = (By.XPATH, '/html/body/section/section/div/div/div[2]/div/div[2]/div[2]/div[2]/div/div[4]/table/tbody/tr')
+            resultado_busca_locator = Cadastro.RESULTADO_BUSCA_DUP
             duplicado = False
             try:
                 linhas = WebDriverWait(driver, 6).until(EC.presence_of_all_elements_located(resultado_busca_locator))
                 if linhas:
-                    primeira_td = linhas[0].find_element(By.XPATH, './td[1]')
+                    primeira_td = linhas[0].find_element(By.XPATH, Cadastro.PRIMEIRA_TD)
                     texto = (primeira_td.text or '').strip()
                     texto_linha = (linhas[0].text or '').strip()
                     if (texto and not texto.upper().startswith('NENHUM')) or (texto_linha and not texto_linha.upper().startswith('NENHUM')):
@@ -1418,38 +1398,38 @@ try:
             pausa_cadastro(2)
 
             # === BLOCO CADASTRO ===
-            wait_visible((By.ID, 'Nome')).send_keys(nome)
+            wait_visible(Cadastro.NOME).send_keys(nome)
             pausa_cadastro(2.5)
 
             # Abre o bloco de telefones
-            safe_click((By.XPATH, '/html/body/div[2]/form/div[2]/div/div/div[1]/div[2]/div[1]/div/div/a'))
+            safe_click(Cadastro.ABRIR_TELEFONES)
             pausa_cadastro(1)
-    
+
             # Seleciona "Celular" no tipo (setas + enter)
-            celular_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[2]/div/div/div[1]/div[2]/div[1]/div/table/tbody/tr/td[1]/span[1]/span/span[1]')
+            celular_combo_locator = Cadastro.CELULAR_COMBO
             safe_click(celular_combo_locator)
             ActionChains(driver).send_keys(Keys.ARROW_DOWN, Keys.ARROW_DOWN, Keys.ENTER).perform()
-    
+
             # Preenche número
-            telefone_grid_input_locator = (By.XPATH, '/html/body/div[2]/form/div[2]/div/div/div[1]/div[2]/div[1]/div/table/tbody/tr/td[3]/input')
+            telefone_grid_input_locator = Cadastro.TELEFONE_GRID_INPUT
             tel_input = wait_visible(telefone_grid_input_locator)
             tel_input.click()
             tel_input.send_keys(telefone)
             pausa_cadastro(1)
 
             # Adiciona telefone (ícone de +/confirmar)
-            safe_click((By.XPATH, '/html/body/div[2]/form/div[2]/div/div/div[1]/div[2]/div[1]/div/table/tbody/tr/td[4]/a[1]/span'))
+            safe_click(Cadastro.ADD_TELEFONE)
             pausa_cadastro(1)
-    
+
             # Canal de Atendimento (selecionado pelo TEXTO, lendo a lista do Sigavi)
-            canal_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[3]/div/div/div[1]/div[1]/div[1]/div[1]/div[1]/span[2]/span/span[1]')
+            canal_combo_locator = Cadastro.CANAL_COMBO
             canal_escolhido = selecionar_kendo_por_texto(
                 canal_combo_locator, [canal_atendimento], default_texto="Plantão de Vendas")
             print(f"Canal de Atendimento: pediu '{canal_atendimento}' -> selecionou '{canal_escolhido}'")
             pausa_cadastro(1)
 
             # Mídia (vem da coluna MIDIA da planilha; seleciona pelo TEXTO)
-            midia_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[3]/div/div/div[1]/div[1]/div[1]/div[1]/div[2]/span[2]/span/span[1]')
+            midia_combo_locator = Cadastro.MIDIA_COMBO
             midia_escolhida = selecionar_kendo_por_texto(
                 midia_combo_locator, midia_candidatos, default_texto=MIDIA_DEFAULT)
             print(f"Midia: planilha '{midia_raw or '(vazio)'}' -> selecionou '{midia_escolhida}'")
@@ -1460,8 +1440,8 @@ try:
             # no combo do Sigavi (ex.: JOTACE/Logan em 2026-06-11), cai pro
             # fallback Tabatanascimento/Corretor Inativo em vez de pular o lead
             # — mesma regra de quem nem esta no json.
-            equipe_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[3]/div/div/div[1]/div[1]/div[1]/div[2]/div[1]/span[1]/span/span[1]')
-            corretor_combo_locator = (By.XPATH, '/html/body/div[2]/form/div[3]/div/div/div[1]/div[1]/div[1]/div[2]/div[2]/div[1]/span[1]/span/span[1]')
+            equipe_combo_locator = Cadastro.EQUIPE_COMBO
+            corretor_combo_locator = Cadastro.CORRETOR_COMBO
             ja_eh_inativo = (
                 normalizar_texto(gerente) == normalizar_texto('Tabatanascimento')
                 and normalizar_texto(corretor) == normalizar_texto('Corretor Inativo')
@@ -1538,8 +1518,8 @@ try:
                 break
     
             # Abre modal "Imóvel/Origem"
-            safe_click((By.XPATH, "/html/body/div[2]/form/div[3]/div/div/div[1]/div[2]/div[2]/a/span"))
-            modal_container = wait_visible((By.XPATH, "/html/body/div[2]/div[2]/div/div"))
+            safe_click(Cadastro.ABRIR_MODAL_IMOVEL)
+            modal_container = wait_visible(Cadastro.MODAL_CONTAINER)
     
             # Seleciona a opção dentro do modal, SE existir. No modal atual do
             # Sigavi nao tem mais os labels de tipo (so campo + Buscar); esperar
@@ -1547,7 +1527,7 @@ try:
             # "Browser caiu" (TimeoutException herda de WebDriverException).
             try:
                 opcao_modal = WebDriverWait(driver, 3).until(
-                    EC.element_to_be_clickable((By.XPATH, "/html/body/div[2]/div[2]/div/div/div[2]/div[1]/div/div/label[2]"))
+                    EC.element_to_be_clickable(Cadastro.MODAL_OPCAO_TIPO)
                 )
                 opcao_modal.click()
                 pausa_cadastro(0.5)
@@ -1557,11 +1537,7 @@ try:
             # Preenche o empreendimento e CONFERE que o texto entrou no campo.
             # O campo e localizado pelo placeholder 'Empreendimento' (robusto a
             # mudancas de layout), com o XPath absoluto antigo como fallback.
-            empreendimento_input_locators = [
-                (By.XPATH, "//input[contains(translate(@placeholder, 'EMPRENDIMTO', 'emprendimto'), 'empreendimento')]"),
-                (By.XPATH, "/html/body/div[2]/div[2]/div/div/div[2]/div[3]/div[1]/input"),
-                (By.XPATH, "/html/body/div[2]/div[2]/div/div//input[@type='text']"),
-            ]
+            empreendimento_input_locators = Cadastro.EMPREENDIMENTO_INPUT
             empreendimento_ok = False
             for tentativa_emp in range(1, 4):
                 try:
@@ -1592,10 +1568,7 @@ try:
                 raise Exception(f"Campo Empreendimento do modal nao recebeu o texto '{EMPREENDIMENTO_BUSCA}'.")
 
             # Confirma modal (botao Buscar) — por texto, com fallback no XPath antigo
-            buscar_modal_locators = [
-                (By.XPATH, "/html/body/div[2]/div[2]/div/div//button[contains(normalize-space(.), 'Buscar')]"),
-                (By.XPATH, "/html/body/div[2]/div[2]/div/div/div[2]/div[3]/div[2]/button"),
-            ]
+            buscar_modal_locators = Cadastro.MODAL_BUSCAR
             botao_buscar = primeiro_elemento_visivel(buscar_modal_locators, timeout=10)
             scroll_into_view(botao_buscar)
             try:
@@ -1605,18 +1578,18 @@ try:
             pausa_cadastro(1)
 
             # Botão que às vezes fica atrás de overlay
-            safe_click((By.CSS_SELECTOR, "#dvImovelOrigemComando a"))
+            safe_click(Cadastro.IMOVEL_ORIGEM_COMANDO)
             pausa_cadastro(1)
 
             # 1) Confirmação inicial do formulário
-            safe_click((By.XPATH, "/html/body/div[2]/form/div[1]/div/div[1]/button[2]"))
+            safe_click(Cadastro.CONFIRMAR_FORM)
             pausa_cadastro(2)
     
             # 2) Tenta fechar popup de duplicidade (se existir) — espera curta
             # (4s) pra nao segurar 20s em todo lead em que o popup nao aparece
             try:
                 botao_dup = WebDriverWait(driver, 4).until(
-                    EC.element_to_be_clickable((By.XPATH, '//*[@id="popVerificaDuplicidade"]/div/div/div[3]/button'))
+                    EC.element_to_be_clickable(Cadastro.POPUP_DUPLICIDADE)
                 )
                 botao_dup.click()
                 pausa_cadastro(0.5)
@@ -1635,7 +1608,7 @@ try:
                 pass
     
             # 3) Salvar
-            safe_click((By.XPATH, '//*[@id="cmdSalva"]'))
+            safe_click(Cadastro.SALVAR)
             pausa_cadastro(3)
 
             # Confirma que o lead realmente entrou (busca o telefone no Fac);
