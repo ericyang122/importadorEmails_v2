@@ -97,6 +97,13 @@ from selenium.common.exceptions import (
 from seletores import Login, Combo, BuscaFac, Cadastro
 
 BASE_URL = "https://abyara.sigavi360.com.br"
+# Endpoints do Sigavi centralizados — tudo deriva do BASE_URL. Se a empresa
+# trocar o dominio (ou apontar pra homologacao), muda so o BASE_URL aqui.
+URL_LOGIN        = f"{BASE_URL}/Acesso/Login?ReturnUrl=%2F"
+URL_HOME         = f"{BASE_URL}/"
+URL_FAC          = f"{BASE_URL}/CRM/Fac"
+URL_FAC_BUSCA    = f"{BASE_URL}/CRM/Fac/Busca"
+URL_FAC_CADASTRO = f"{BASE_URL}/CRM/Fac/Cadastro"
 # Quantas buscas por email rodam em paralelo no modo consulta.
 # 8 e o padrao; o retry anti-throttle recupera respostas vazias, entao nao
 # perde telefone mesmo se o Sigavi limitar. Baixe via .env se ficar lento.
@@ -251,7 +258,7 @@ def reconectar_browser():
     wait = WebDriverWait(driver, 20)
     time.sleep(2)
     # Re-login
-    driver.get("https://abyara.sigavi360.com.br/Acesso/Login?ReturnUrl=%2F")
+    driver.get(URL_LOGIN)
     time.sleep(4)
     WebDriverWait(driver, 30).until(
         EC.visibility_of_element_located(Login.USUARIO)
@@ -301,7 +308,7 @@ def relogar_sigavi():
     # login. Sem relogar aqui, TODO lead a partir da queda falhava com
     # "Pagina /CRM/Fac nao carregou" ate o fim da planilha (job de 2026-06-11).
     print("Sessao do Sigavi caiu (redirecionado pro login). Relogando...")
-    driver.get("https://abyara.sigavi360.com.br/Acesso/Login?ReturnUrl=%2F")
+    driver.get(URL_LOGIN)
     time.sleep(3)
     wait_visible(Login.USUARIO, timeout=30)\
         .send_keys(SIGAVI_LOGIN)
@@ -309,7 +316,7 @@ def relogar_sigavi():
         .send_keys(SIGAVI_SENHA)
     safe_click(Login.ENTRAR)
     time.sleep(3)
-    driver.get(BASE_URL + "/")
+    driver.get(URL_HOME)
     time.sleep(2)
     if sessao_caiu_para_login():
         raise RuntimeError(
@@ -554,11 +561,11 @@ def telefone_existe_no_sigavi(telefone, tentativas=3):
     telefone_digits = re.sub(r'\D', '', str(telefone))
     for tentativa in range(1, tentativas + 1):
         try:
-            driver.get('https://abyara.sigavi360.com.br/CRM/Fac')
+            driver.get(URL_FAC)
             time.sleep(1)
             if sessao_caiu_para_login():
                 relogar_sigavi()
-                driver.get('https://abyara.sigavi360.com.br/CRM/Fac')
+                driver.get(URL_FAC)
                 time.sleep(1)
             if not preencher_input_visivel(telefone_busca_locators, telefone, 'Telefone da verificacao'):
                 continue
@@ -594,7 +601,7 @@ def criar_session_requests():
 
 def obter_csrf_token(session):
     try:
-        resp = session.get(f"{BASE_URL}/CRM/Fac", timeout=20)
+        resp = session.get(URL_FAC, timeout=20)
         m = re.search(r'<input[^>]+name="__RequestVerificationToken"[^>]+value="([^"]+)"', resp.text)
         if m:
             return m.group(1)
@@ -749,7 +756,7 @@ def buscar_contato(session, csrf_token, numero='', email='', cliente=''):
         try:
             token_atual = req_csrf_token or csrf_token
             resp = session.post(
-                f"{BASE_URL}/CRM/Fac/Busca",
+                URL_FAC_BUSCA,
                 data={**payload, '__RequestVerificationToken': token_atual},
                 headers=headers,
                 timeout=30,
@@ -770,7 +777,7 @@ def buscar_contato(session, csrf_token, numero='', email='', cliente=''):
                         time.sleep(CONSULTA_BACKOFF * tentativa)
                         continue
                     resp = session.post(
-                        f"{BASE_URL}/CRM/Fac/Busca",
+                        URL_FAC_BUSCA,
                         data={**payload, '__RequestVerificationToken': token_atual},
                         headers=headers,
                         timeout=30,
@@ -896,7 +903,7 @@ canal_carteira_tipos = {
 # =========================
 # LOGIN
 # =========================
-driver.get("https://abyara.sigavi360.com.br/Acesso/Login?ReturnUrl=%2F")
+driver.get(URL_LOGIN)
 time.sleep(2)
 
 wait_visible(Login.USUARIO)\
@@ -914,7 +921,7 @@ safe_click(Login.ENTRAR)
 # Da tempo do POST de login processar e verifica de forma robusta: abre a home;
 # se a sessao nao estiver autenticada, o Sigavi redireciona de volta pro login.
 time.sleep(3)
-driver.get(BASE_URL + "/")
+driver.get(URL_HOME)
 time.sleep(2)
 _url_pos_login = driver.current_url.lower()
 if "login" in _url_pos_login or "/acesso" in _url_pos_login:
@@ -985,7 +992,7 @@ if MODE == 'consulta':
     print("Modo selecionado: somente consulta.")
 else:
     print("Modo selecionado: somente cadastro.")
-    driver.get('https://abyara.sigavi360.com.br/CRM/Fac')
+    driver.get(URL_FAC)
     time.sleep(2)
 
 # mapa para tolerar variações de caixa no dicionário
@@ -1315,7 +1322,7 @@ try:
             for tentativa in range(3):
                 if parada_solicitada():
                     raise KeyboardInterrupt
-                driver.get('https://abyara.sigavi360.com.br/CRM/Fac')
+                driver.get(URL_FAC)
                 pausa_cadastro(3)
                 try:
                     telefone_elem_busca = wait_visible(telefone_busca_locator, timeout=20)
@@ -1394,7 +1401,7 @@ try:
             pausa_cadastro(0.5)
 
             # Vai direto ao cadastro
-            driver.get('https://abyara.sigavi360.com.br/CRM/Fac/Cadastro')
+            driver.get(URL_FAC_CADASTRO)
             pausa_cadastro(2)
 
             # === BLOCO CADASTRO ===
