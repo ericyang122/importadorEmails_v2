@@ -1221,6 +1221,70 @@ if MODE == 'consulta':
         driver.quit()
         raise SystemExit(0)
 
+
+def resolver_equipe_corretor(index, nome, email_raw, telefone,
+                             corretor_original_raw, corretor_original_norm):
+    """Resolve (equipe, corretor) pela regra de negocio do corretores.json.
+
+    A equipe SEMPRE sai do corretores.json a partir do CORRETOR DE ORIGEM (a
+    coluna GERENTE da planilha NAO e usada — vem com apelido). Corretor fora do
+    json = inativo -> cadastra como Tabatanascimento/Corretor Inativo (registra
+    no relatorio de inativos, mas NAO pula o lead). Tambem traduz apelido de
+    equipe pro nome oficial quando casa com exatamente UMA equipe (ex.: ELAINE
+    -> Elainemaion). Retorna (gerente, corretor).
+    """
+    if corretor_original_norm in mapa_corretores:
+        gerente  = mapa_corretores[corretor_original_norm]
+        corretor = corretor_original_raw.strip()
+    elif corretor_original_norm in mapa_corretores_base:
+        gerente  = mapa_corretores_base[corretor_original_norm]
+        corretor = corretor_original_raw.strip()
+        print(f"Corretor '{corretor_original_raw}' encontrado via nome base (sem sufixo). Gerente: {gerente}")
+    else:
+        print(f"Corretor '{corretor_original_raw}' nao encontrado no corretores.json (inativo). Cadastrando como equipe Tabatanascimento / Corretor Inativo.")
+        gerente  = "Tabatanascimento"
+        corretor = "Corretor Inativo"
+        resultados_corretor_inativo.append({
+            'Linha': index + 1,
+            'Nome': nome,
+            'Email': email_raw,
+            'Telefone': telefone,
+            'Status': 'corretor_inativo',
+            'Detalhe': f"Corretor '{corretor_original_raw.strip() or '(vazio)'}' nao encontrado no corretores.json; cadastrado como Tabatanascimento/Corretor Inativo.",
+        })
+
+    # Traduz apelido de equipe pro nome oficial quando bater com exatamente
+    # UMA equipe do corretores.json (ex.: ELAINE -> Elainemaion). Sem isso o
+    # combo do Sigavi nao acha a opcao e o lead e pulado a toa.
+    gerente_norm_aj = normalizar_texto(gerente)
+    if gerente_norm_aj and all(normalizar_texto(e) != gerente_norm_aj for e in equipes_oficiais):
+        candidatas = [
+            e for e in equipes_oficiais
+            if gerente_norm_aj in normalizar_texto(e) or normalizar_texto(e) in gerente_norm_aj
+        ]
+        if len(candidatas) == 1:
+            print(f"Equipe '{gerente}' ajustada para '{candidatas[0]}' (nome oficial do corretores.json).")
+            gerente = candidatas[0]
+        elif len(candidatas) > 1:
+            print(f"Equipe '{gerente}' bate com varias do corretores.json ({', '.join(candidatas[:4])}); mantendo como veio.")
+    return gerente, corretor
+
+
+def selecionar_canal_midia(canal_atendimento, midia_candidatos, midia_raw):
+    """Seleciona Canal de Atendimento e Midia no form de cadastro (pelo TEXTO,
+    lendo a lista ao vivo do Sigavi). Retorna (canal_escolhido, midia_escolhida)."""
+    canal_escolhido = selecionar_kendo_por_texto(
+        Cadastro.CANAL_COMBO, [canal_atendimento], default_texto="Plantão de Vendas")
+    print(f"Canal de Atendimento: pediu '{canal_atendimento}' -> selecionou '{canal_escolhido}'")
+    pausa_cadastro(1)
+
+    midia_escolhida = selecionar_kendo_por_texto(
+        Cadastro.MIDIA_COMBO, midia_candidatos, default_texto=MIDIA_DEFAULT)
+    print(f"Midia: planilha '{midia_raw or '(vazio)'}' -> selecionou '{midia_escolhida}'")
+    pausa_cadastro(1)
+    return canal_escolhido, midia_escolhida
+
+
 try:
     for index, row in df.iterrows():
         if index <= _ultimo_index:
@@ -1270,47 +1334,13 @@ try:
         midia_norm = normalizar_texto(midia_raw)
         midia_candidatos = [MIDIA_AJUSTES.get(midia_norm), midia_raw]
 
-        # Regra de negocio (igual a automacao do Pedro/automa-o_abyara): a
-        # equipe SEMPRE sai do corretores.json a partir do CORRETOR DE ORIGEM
-        # — a coluna GERENTE da planilha NAO e usada (vem com apelido, ex.
-        # 'ELAINE', que nao existe no combo do Sigavi). Corretor fora do json
-        # = corretor inativo -> cadastra como Tabatanascimento/Corretor Inativo
-        # (cadastra mesmo assim, nao pula o lead).
-        if corretor_original_norm in mapa_corretores:
-            gerente  = mapa_corretores[corretor_original_norm]
-            corretor = corretor_original_raw.strip()
-        elif corretor_original_norm in mapa_corretores_base:
-            gerente  = mapa_corretores_base[corretor_original_norm]
-            corretor = corretor_original_raw.strip()
-            print(f"Corretor '{corretor_original_raw}' encontrado via nome base (sem sufixo). Gerente: {gerente}")
-        else:
-            print(f"Corretor '{corretor_original_raw}' nao encontrado no corretores.json (inativo). Cadastrando como equipe Tabatanascimento / Corretor Inativo.")
-            gerente  = "Tabatanascimento"
-            corretor = "Corretor Inativo"
-            resultados_corretor_inativo.append({
-                'Linha': index + 1,
-                'Nome': nome,
-                'Email': email_raw,
-                'Telefone': telefone,
-                'Status': 'corretor_inativo',
-                'Detalhe': f"Corretor '{corretor_original_raw.strip() or '(vazio)'}' nao encontrado no corretores.json; cadastrado como Tabatanascimento/Corretor Inativo.",
-            })
+        # Regra de negocio: equipe/corretor saem do corretores.json a partir do
+        # CORRETOR DE ORIGEM (detalhes na funcao). Corretor fora do json vira
+        # Tabatanascimento/Corretor Inativo, mas o lead NAO e pulado.
+        gerente, corretor = resolver_equipe_corretor(
+            index, nome, email_raw, telefone,
+            corretor_original_raw, corretor_original_norm)
 
-        # Traduz apelido de equipe pro nome oficial quando bater com exatamente
-        # UMA equipe do corretores.json (ex.: ELAINE -> Elainemaion). Sem isso o
-        # combo do Sigavi nao acha a opcao e o lead e pulado a toa.
-        gerente_norm_aj = normalizar_texto(gerente)
-        if gerente_norm_aj and all(normalizar_texto(e) != gerente_norm_aj for e in equipes_oficiais):
-            candidatas = [
-                e for e in equipes_oficiais
-                if gerente_norm_aj in normalizar_texto(e) or normalizar_texto(e) in gerente_norm_aj
-            ]
-            if len(candidatas) == 1:
-                print(f"Equipe '{gerente}' ajustada para '{candidatas[0]}' (nome oficial do corretores.json).")
-                gerente = candidatas[0]
-            elif len(candidatas) > 1:
-                print(f"Equipe '{gerente}' bate com varias do corretores.json ({', '.join(candidatas[:4])}); mantendo como veio.")
-    
         # Cada lead tem ate 2 tentativas completas: se falhar no meio (combo,
         # modal, crash do browser), roda o lead de novo uma vez; persistindo o
         # erro, registra na planilha e PULA pro proximo (nao trava o job).
@@ -1428,19 +1458,8 @@ try:
             safe_click(Cadastro.ADD_TELEFONE)
             pausa_cadastro(1)
 
-            # Canal de Atendimento (selecionado pelo TEXTO, lendo a lista do Sigavi)
-            canal_combo_locator = Cadastro.CANAL_COMBO
-            canal_escolhido = selecionar_kendo_por_texto(
-                canal_combo_locator, [canal_atendimento], default_texto="Plantão de Vendas")
-            print(f"Canal de Atendimento: pediu '{canal_atendimento}' -> selecionou '{canal_escolhido}'")
-            pausa_cadastro(1)
-
-            # Mídia (vem da coluna MIDIA da planilha; seleciona pelo TEXTO)
-            midia_combo_locator = Cadastro.MIDIA_COMBO
-            midia_escolhida = selecionar_kendo_por_texto(
-                midia_combo_locator, midia_candidatos, default_texto=MIDIA_DEFAULT)
-            print(f"Midia: planilha '{midia_raw or '(vazio)'}' -> selecionou '{midia_escolhida}'")
-            pausa_cadastro(1)
+            # Canal de Atendimento + Midia (selecionados pelo TEXTO, lista ao vivo)
+            selecionar_canal_midia(canal_atendimento, midia_candidatos, midia_raw)
 
             # Equipe (gerente) — seleciona digitando e CONFERE se realmente pegou.
             # Se a equipe/corretor estiverem no corretores.json mas NAO aparecerem
