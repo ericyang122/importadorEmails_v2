@@ -653,11 +653,22 @@ def _extrair_fone_de_texto(texto):
                     return d2
     return None
 
-def extrair_telefone_do_html(html):
-    """Analisa a resposta da busca. Retorna (telefone|None, classificacao).
+_EMAIL_RE = re.compile(r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}')
+
+
+def _extrair_email_de_texto(texto):
+    """Primeiro email valido dentro de um trecho de texto, ou None."""
+    if not texto:
+        return None
+    m = _EMAIL_RE.search(texto)
+    return m.group(0) if m else None
+
+
+def extrair_contato_do_html(html):
+    """Analisa a resposta da busca. Retorna (telefone|None, email|None, classificacao).
 
     classificacao:
-      'encontrado'   -> achou telefone valido
+      'encontrado'   -> achou telefone E/OU email validos
       'sem_resultado'-> ausencia confirmada (texto de "sem resultado" ou grade vazia)
       'suspeito'     -> resposta anomala/incompleta (provavel throttle do Sigavi);
                         deve ser retentada para nao virar falso "nao encontrado"
@@ -671,34 +682,47 @@ def extrair_telefone_do_html(html):
     # respostas curtas (< 5000 chars) só são "sem resultado" quando trazem a
     # confirmação textual; sem ela, uma resposta curta é anômala (throttle)
     if len(html) < 5000 and tem_kw_sem_resultado:
-        return None, 'sem_resultado'
+        return None, None, 'sem_resultado'
 
-    # 1) células marcadas como dados pessoais (telefone preenchido)
-    dados_pessoais = re.findall(r'<td[^>]*data-dados-pessoais="true"[^>]*>([^<]*)</td>', html)
-    for celula in dados_pessoais:
-        tel = _extrair_fone_de_texto(celula)
-        if tel:
-            return tel, 'encontrado'
+    tel = None
+    email = None
 
-    # 2) todas as <td> do tbody
+    def _coletar(celula):
+        nonlocal tel, email
+        if tel is None:
+            tel = _extrair_fone_de_texto(celula)
+        if email is None:
+            email = _extrair_email_de_texto(celula)
+
+    # 1) células marcadas como dados pessoais (telefone/email preenchidos)
+    for celula in re.findall(r'<td[^>]*data-dados-pessoais="true"[^>]*>([^<]*)</td>', html):
+        _coletar(celula)
+    if tel or email:
+        return tel, email, 'encontrado'
+
+    # 2) todas as <td> do tbody (email tambem aparece fora de data-dados-pessoais)
     tbody = re.search(r'<tbody>(.*?)</tbody>', html, re.DOTALL)
     if tbody:
         for celula in re.findall(r'<td[^>]*>([^<]*)</td>', tbody.group(1)):
-            tel = _extrair_fone_de_texto(celula)
-            if tel:
-                return tel, 'encontrado'
-        # veio a grade de resultados, mas sem telefone util -> ausencia real
-        return None, 'sem_resultado'
+            _coletar(celula)
+        if tel or email:
+            return tel, email, 'encontrado'
+        # veio a grade de resultados, mas sem telefone/email util -> ausencia real
+        return None, None, 'sem_resultado'
 
     # confirmacao textual de ausencia mesmo sem grade
     if tem_kw_sem_resultado:
-        return None, 'sem_resultado'
+        return None, None, 'sem_resultado'
 
     # sem grade e sem confirmacao textual -> resposta anomala (provavel throttle)
-    return None, 'suspeito'
+    return None, None, 'suspeito'
 
-def buscar_telefone_por_email(session, csrf_token, email):
-    """Busca o telefone de um lead pelo email. Retorna (telefone|None, erro|None).
+def buscar_contato(session, csrf_token, numero='', email='', cliente=''):
+    """Busca telefone + email de um lead no Fac do Sigavi.
+
+    Preenche UM criterio de busca conforme o que a planilha tiver (a prioridade
+    fica no chamador): por numero da FAC, por email, ou por nome do cliente.
+    Retorna (telefone|None, email|None, erro|None).
 
     Seguro para uso em paralelo: a renovacao de sessao expirada acontece sob
     _token_lock, ja que mexe nos cookies do driver Selenium (nao thread-safe).
@@ -707,7 +731,7 @@ def buscar_telefone_por_email(session, csrf_token, email):
     payload = {
         'FacBusca': 'true',
         '__RequestVerificationToken': csrf_token,
-        'Numero': '', 'Fase0': 'false', 'Fase1': 'false', 'Fase2': 'false',
+        'Numero': str(numero or ''), 'Fase0': 'false', 'Fase1': 'false', 'Fase2': 'false',
         'Fase3': 'false', 'Fase4': 'false', 'Fase5': 'false',
         'RetornoVisita': 'false', 'FaseAnalise': 'false',
         'Fase6': 'false', 'Fase7': 'false',
@@ -719,7 +743,7 @@ def buscar_telefone_por_email(session, csrf_token, email):
         'IdCargo': '0', 'IdMotivoFinalizacao': '0', 'IdCentralAtendimento': '0',
         'EmpreendimentoUsados': '', 'TarefaAgendada': '', 'IdAgencia': '',
         'EquipeOrigem': 'false', 'CorretorOrigem': 'false', 'ParceriaInterna': 'false',
-        'EquipeGerente2': '', 'Cliente': '', 'Email': email,
+        'EquipeGerente2': '', 'Cliente': cliente or '', 'Email': email or '',
         'DDI': '', 'Telefone': '', 'CpfCnpj': '',
         'Compra': 'false', 'Locacao': 'false', 'IdFinalidade': '0',
         'Dormitorio': '0,10', 'Suite': '0,10', 'Vaga': '0,10',
@@ -775,11 +799,11 @@ def buscar_telefone_por_email(session, csrf_token, email):
                         time.sleep(CONSULTA_BACKOFF * tentativa)
                         continue
 
-                tel, classificacao = extrair_telefone_do_html(resp.text)
+                tel, email_enc, classificacao = extrair_contato_do_html(resp.text)
                 if classificacao == 'encontrado':
-                    return tel, None
+                    return tel, email_enc, None
                 if classificacao == 'sem_resultado':
-                    return None, None  # ausencia confiavel
+                    return None, None, None  # ausencia confiavel
                 # 'suspeito' -> provavel throttle; espera e tenta de novo
                 ultimo_erro = f'Resposta suspeita ({len(resp.text)} chars) - possivel limite do Sigavi.'
             else:
@@ -789,7 +813,7 @@ def buscar_telefone_por_email(session, csrf_token, email):
 
         time.sleep(CONSULTA_BACKOFF * tentativa)
 
-    return None, ultimo_erro
+    return None, None, ultimo_erro
 
 def normalizar_texto(valor: str) -> str:
     if valor is None:
@@ -951,6 +975,22 @@ if _email_col:
 else:
     print("AVISO: Nenhuma coluna de email encontrada na planilha.")
 
+# detecta coluna do numero da FAC (criterio de busca mais preciso: identifica
+# o registro exato, sem ambiguidade de homonimo como acontece na busca por nome)
+_fac_col = next(
+    (c for c in df.columns if re.fullmatch(r'\s*(fac|n[º°o]?\.?\s*fac|numero|n[º°o])\s*', str(c), re.IGNORECASE)),
+    None
+)
+if _fac_col:
+    print(f"Coluna de FAC detectada: '{_fac_col}'")
+
+# detecta a coluna de nome do cliente (fallback de busca). Algumas planilhas
+# chamam de 'Cliente' (ex.: vendas Catania), outras ja vieram como 'NOME' no rename.
+_nome_col = ('NOME' if 'NOME' in df.columns else
+             next((c for c in df.columns if re.search(r'(nome|cliente)', str(c), re.IGNORECASE)), None))
+if _nome_col:
+    print(f"Coluna de nome detectada: '{_nome_col}'")
+
 # =========================
 # LOOP DE CADASTRO
 # =========================
@@ -1084,39 +1124,58 @@ def emitir_progresso():
 
 
 def _processar_linha_consulta(index, row):
-    """Resolve o telefone de uma unica linha (sem efeitos colaterais de estado).
+    """Resolve telefone + email de uma unica linha (sem efeitos colaterais de estado).
 
     Roda em paralelo dentro do ThreadPoolExecutor: faz a busca HTTP quando
     necessario e devolve o dict pronto para a planilha de resultado.
+
+    Escolhe O CRITERIO de busca pela ordem de confiabilidade do que a planilha
+    tiver, conforme combinado: 1) numero da FAC (cravar o registro exato),
+    2) email, 3) so o nome do cliente (fallback, sujeito a homonimo).
     """
-    nome = str(row.get('NOME') or '').strip()
+    nome = str(row.get(_nome_col) or '').strip() if _nome_col else str(row.get('NOME') or '').strip()
     email_raw = str(row.get(_email_col) or '').strip() if _email_col else ''
+    fac = re.sub(r'\D', '', str(row.get(_fac_col) or '')) if _fac_col else ''
     telefone = re.sub(r'\D', '', str(row.get('FONE2') or ''))
 
-    def _resultado(status, telefone_final, detalhe):
+    def _resultado(status, telefone_final, email_final, detalhe):
         return {
             'Linha': index + 1,
             'Nome': nome,
-            'Email': email_raw,
+            'Email': email_final,
             'Telefone': telefone_final,
             'Status': status,
             'Detalhe': detalhe,
         }
 
-    if not email_raw:
-        return _resultado('erro_consulta', '', 'Email ausente na planilha.')
-    if len(telefone) >= 11:
-        return _resultado('encontrado', telefone, 'Telefone ja estava na planilha.')
-    if not (req_session and req_csrf_token):
-        return _resultado('erro_consulta', '', 'Sessao de consulta indisponivel.')
+    # atalho: planilha ja traz telefone e email -> nada a buscar
+    if len(telefone) >= 11 and email_raw:
+        return _resultado('encontrado', telefone, email_raw, 'Telefone e email ja estavam na planilha.')
 
-    tel, erro = buscar_telefone_por_email(req_session, req_csrf_token, email_raw)
-    tel = tel or ''
-    if len(tel) >= 10:
-        return _resultado('encontrado', tel, 'Telefone encontrado por email.')
+    # decide o criterio de busca (FAC > email > nome)
+    if fac:
+        criterio, kwargs = f'FAC {fac}', {'numero': fac}
+    elif email_raw:
+        criterio, kwargs = 'email', {'email': email_raw}
+    elif nome:
+        # ignora conjuge ("FULANO | BELTRANA") e usa so o 1o nome na busca
+        nome_busca = re.split(r'[|/]', nome)[0].strip()
+        criterio, kwargs = 'nome', {'cliente': nome_busca}
+    else:
+        return _resultado('erro_consulta', telefone, email_raw, 'Linha sem FAC, email nem nome para buscar.')
+
+    if not (req_session and req_csrf_token):
+        return _resultado('erro_consulta', telefone, email_raw, 'Sessao de consulta indisponivel.')
+
+    tel, email_enc, erro = buscar_contato(req_session, req_csrf_token, **kwargs)
+    tel_final = re.sub(r'\D', '', tel or '') or telefone
+    email_final = email_raw or (email_enc or '')
+
     if erro:
-        return _resultado('erro_consulta', '', erro)
-    return _resultado('nao_encontrado', '', 'Telefone nao encontrado por email.')
+        return _resultado('erro_consulta', tel_final, email_final, erro)
+    if len(tel_final) >= 10 or email_final:
+        return _resultado('encontrado', tel_final, email_final, f'Encontrado por {criterio}.')
+    return _resultado('nao_encontrado', tel_final, email_final, f'Nao encontrado por {criterio}.')
 
 
 if MODE == 'consulta':

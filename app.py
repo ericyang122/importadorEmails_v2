@@ -88,6 +88,21 @@ COLUNAS_RENOMEAR = {
     "gerente": "GERENTE",
 }
 
+# Criterios de busca do modo Consulta (mesma deteccao do confio.py): a planilha
+# pode trazer o numero da FAC, o email ou so o nome do cliente.
+RE_FAC_COL = re.compile(r"^\s*(fac|n[º°o]?\.?\s*fac|numero|n[º°o])\s*$", re.IGNORECASE)
+RE_NOME_COL = re.compile(r"(nome|cliente)", re.IGNORECASE)
+RE_EMAIL_COL = re.compile(r"e.?mail", re.IGNORECASE)
+
+
+def _detectar_coluna(df, regex, full=False):
+    """Primeira coluna cujo nome casa com o regex (fullmatch ou search)."""
+    for c in df.columns:
+        s = str(c)
+        if (regex.fullmatch(s) if full else regex.search(s)):
+            return c
+    return None
+
 APP_PASSWORD_CONFIGURED = bool(os.getenv("APP_PASSWORD"))
 APP_PASSWORD = os.getenv("APP_PASSWORD", "marketing123")
 JOBS = {}
@@ -139,15 +154,24 @@ def ler_planilha_upload(upload):
 
 
 def dados_validos_planilha(df, mode):
-    email_col = next((c for c in df.columns if re.match(r"e.?mail", str(c), re.IGNORECASE)), None)
+    email_col = _detectar_coluna(df, RE_EMAIL_COL)
     if mode == "consulta":
-        if not email_col:
-            return 0, email_col
-        validos = int(
-            df[email_col].apply(
-                lambda valor: str(valor).strip().lower() not in {"", "nan", "none"}
-            ).sum()
-        )
+        # vale a linha que tiver QUALQUER criterio de busca: FAC, email ou nome.
+        fac_col = _detectar_coluna(df, RE_FAC_COL, full=True)
+        nome_col = _detectar_coluna(df, RE_NOME_COL) or ("NOME" if "NOME" in df.columns else None)
+
+        def _preenchido(col):
+            if not col or col not in df.columns:
+                return None
+            return df[col].apply(lambda v: str(v).strip().lower() not in {"", "nan", "none"})
+
+        mask = None
+        for col in (fac_col, email_col, nome_col):
+            m = _preenchido(col)
+            if m is None:
+                continue
+            mask = m if mask is None else (mask | m)
+        validos = int(mask.sum()) if mask is not None else 0
         return validos, email_col
 
     if "FONE2" not in df.columns:
@@ -807,8 +831,11 @@ def preview_planilha():
 
     # Colunas amigaveis para a previa (so as que existirem na planilha).
     empreend_col = next((c for c in df.columns if "EMPREEND" in str(c).upper()), None)
+    fac_col = _detectar_coluna(df, RE_FAC_COL, full=True)
+    nome_col = _detectar_coluna(df, RE_NOME_COL) or ("NOME" if "NOME" in df.columns else None)
     mapa_exibicao = [
-        ("Nome", "NOME"),
+        ("FAC", fac_col),
+        ("Nome", nome_col),
         ("Email", email_col),
         ("Telefone", "FONE2"),
         ("Corretor", "CORRETOR DE ORIGEM"),
@@ -818,20 +845,22 @@ def preview_planilha():
     tem = {rotulo: (col is not None and col in df.columns) for rotulo, col in mapa_exibicao}
 
     # Validacao por modo: cada modo precisa de colunas diferentes.
-    #  - consulta: basta o email (a automacao busca o telefone a partir dele);
+    #  - consulta: basta UM criterio de busca (FAC, email ou nome) — a automacao
+    #    busca telefone+email no Sigavi a partir dele, nessa ordem de prioridade;
     #  - cadastro: precisa de Nome, Telefone, Corretor e Empreendimento.
     if mode == "consulta":
-        if tem["Email"]:
+        if tem["FAC"] or tem["Email"] or tem["Nome"]:
             faltando = []
             status_previa = "ok"
+            criterio = "FAC" if tem["FAC"] else ("e-mail" if tem["Email"] else "nome")
             mensagem_previa = (
-                f"Planilha de consulta OK — {validos} e-mail(s) prontos pra buscar telefone no Sigavi."
+                f"Planilha de consulta OK — {validos} linha(s) com {criterio} pra buscar telefone + e-mail no Sigavi."
             )
         else:
-            faltando = ["Email"]
+            faltando = ["FAC/Email/Nome"]
             status_previa = "aviso"
             mensagem_previa = (
-                "Nenhuma coluna de e-mail encontrada. No modo Consulta a planilha precisa ter uma coluna de e-mail."
+                "Nenhuma coluna de FAC, e-mail ou nome encontrada. No modo Consulta a planilha precisa de pelo menos uma delas."
             )
     else:  # cadastro
         necessarias = ["Nome", "Telefone", "Corretor", "Empreendimento"]
