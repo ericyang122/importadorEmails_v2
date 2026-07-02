@@ -103,14 +103,12 @@ def _detectar_coluna(df, regex, full=False):
             return c
     return None
 
-APP_PASSWORD_CONFIGURED = bool(os.getenv("APP_PASSWORD"))
-APP_PASSWORD = os.getenv("APP_PASSWORD", "marketing123")
+APP_PASSWORD = os.getenv("APP_PASSWORD")
+if not APP_PASSWORD:
+    raise RuntimeError("APP_PASSWORD nao configurado — recusando iniciar (sem senha padrao insegura).")
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 RUN_LOCK = threading.Lock()
-
-if not APP_PASSWORD_CONFIGURED:
-    print("AVISO: APP_PASSWORD nao configurado. Senha local padrao: marketing123")
 
 
 def get_csrf_token():
