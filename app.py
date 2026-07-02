@@ -15,6 +15,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, redirect, render_template, request, session, url_for
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
 import whatsapp
@@ -75,6 +78,13 @@ app.config.update(
 # evita o descompasso "HTML velho + CSS novo" ao atualizar a interface.
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+
+# Atras do ngrok: confia no X-Forwarded-For pra ter o IP real do cliente
+# (rate-limit por IP e logs corretos, em vez de todos virem como 127.0.0.1).
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
+
+# Rate-limit: protege o /login de brute-force no link publico.
+limiter = Limiter(key_func=get_remote_address, app=app, storage_uri="memory://")
 
 
 @app.after_request
@@ -572,6 +582,7 @@ def listar_destinos():
 
 
 @app.post("/login")
+@limiter.limit("5 per 15 minutes")
 def login():
     if not check_csrf():
         return redirect(url_for("index", login_error="Sessao expirada. Tente novamente."))
