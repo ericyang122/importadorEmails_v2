@@ -76,6 +76,17 @@ app.config.update(
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
+
+@app.after_request
+def _add_security_headers(resp):
+    """Headers de seguranca em toda resposta (app exposto via HTTPS)."""
+    resp.headers["X-Frame-Options"] = "DENY"              # anti-clickjacking
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    resp.headers["Server"] = "webserver"                  # nao entregar "waitress"
+    return resp
+
 # Mesma normalizacao de colunas usada no confio.py, para a previa bater com a execucao.
 COLUNAS_RENOMEAR = {
     "CORRETOR ORIGEM": "CORRETOR DE ORIGEM",
@@ -616,7 +627,8 @@ def create_job():
         df, _sheet = ler_planilha_upload(upload)
         validos, _email_col = dados_validos_planilha(df, mode)
     except Exception as exc:
-        return jsonify({"error": f"Nao foi possivel ler a planilha: {exc}"}), 400
+        app.logger.warning("Falha ao ler planilha (previa): %s", exc)
+        return jsonify({"error": "Nao foi possivel ler a planilha."}), 400
     if validos == 0:
         requisito = "e-mail" if mode == "consulta" else "telefone valido"
         return jsonify({"error": f"A planilha nao possui nenhuma linha com {requisito}."}), 400
@@ -754,7 +766,8 @@ def reprocess_errors(job_id):
     try:
         dados = json.loads(progresso_path.read_text(encoding="utf-8"))
     except (ValueError, OSError) as exc:
-        return jsonify({"error": f"Nao foi possivel ler o progresso: {exc}"}), 400
+        app.logger.warning("Falha ao ler progresso: %s", exc)
+        return jsonify({"error": "Nao foi possivel ler o progresso."}), 400
 
     linhas_erro = sorted(
         {
@@ -775,7 +788,8 @@ def reprocess_errors(job_id):
         sheet = excel_file.sheet_names[0]
         df = excel_file.parse(sheet)
     except Exception as exc:
-        return jsonify({"error": f"Nao foi possivel ler a planilha de entrada: {exc}"}), 400
+        app.logger.warning("Falha ao ler planilha de entrada: %s", exc)
+        return jsonify({"error": "Nao foi possivel ler a planilha de entrada."}), 400
 
     # 'Linha' = index + 1 no confio.py, entao a posicao 0-based e (Linha - 1).
     posicoes = [linha - 1 for linha in linhas_erro if 0 <= linha - 1 < len(df)]
@@ -821,7 +835,8 @@ def preview_planilha():
 
         df, sheet = ler_planilha_upload(upload)
     except Exception as exc:  # planilha corrompida, vazia, etc.
-        return jsonify({"error": f"Nao foi possivel ler a planilha: {exc}"}), 400
+        app.logger.warning("Falha ao ler planilha (cadastro): %s", exc)
+        return jsonify({"error": "Nao foi possivel ler a planilha."}), 400
 
     total = int(len(df))
     validos, email_col = dados_validos_planilha(df, mode)
