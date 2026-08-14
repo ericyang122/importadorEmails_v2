@@ -1160,8 +1160,13 @@ def _processar_linha_consulta(index, row):
 
     if erro:
         return _resultado('erro_consulta', tel_final, email_final, erro)
-    if len(tel_final) >= 10 or email_final:
+    if len(tel_final) >= 10:
         return _resultado('encontrado', tel_final, email_final, f'Encontrado por {criterio}.')
+    if email_final:
+        return _resultado(
+            'nao_encontrado', tel_final, email_final,
+            f'Cadastro encontrado por {criterio}, mas sem telefone no Sigavi.',
+        )
     return _resultado('nao_encontrado', tel_final, email_final, f'Nao encontrado por {criterio}.')
 
 
