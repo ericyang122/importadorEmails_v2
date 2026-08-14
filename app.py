@@ -916,6 +916,116 @@ def preview_planilha():
     })
 
 
+# =========================
+# API para o Eriquizinho (disparo por WhatsApp)
+# =========================
+API_TOKEN = os.getenv("API_TOKEN", "").strip()
+# O importador fica exposto na internet pelo ngrok, mas o Eriquizinho roda na
+# MESMA VM — entao a API nao precisa aceitar nada de fora. Com isso, vazar o
+# token nao basta: o atacante teria que estar dentro da maquina.
+API_SOMENTE_LOCAL = os.getenv("API_SOMENTE_LOCAL", "true").strip().lower() in {"1", "true", "yes", "sim"}
+
+
+# Porta so da API, ouvindo apenas em 127.0.0.1. O tunel do ngrok aponta pra
+# 5000, entao nada que venha da internet chega aqui.
+API_PORT = os.getenv("API_PORT", "5005").strip()
+
+
+def chamada_e_local():
+    """True se a requisicao entrou pela porta interna da API.
+
+    Nao da pra decidir isso por header nem por IP nesta montagem: o waitress
+    APAGA os X-Forwarded-* (nao ha trusted_proxy configurado) e o ngrok roda
+    na propria VM, entao toda requisicao chega como 127.0.0.1. A porta e a
+    unica coisa que a internet nao consegue escolher — o tunel so publica a
+    5000, e a 5005 nem sequer aceita conexao de fora da maquina.
+    """
+    return str(request.environ.get("SERVER_PORT", "")) == API_PORT
+
+
+def api_token_ok():
+    """Confere o token do header. Sem API_TOKEN no .env, a API fica desligada."""
+    if not API_TOKEN:
+        return False
+    return secrets.compare_digest(request.headers.get("X-API-Token", ""), API_TOKEN)
+
+
+@app.post("/api/jobs")
+@limiter.limit("10 per hour")
+def api_create_job():
+    """Dispara um job de CONSULTA a partir de uma planilha mandada no WhatsApp.
+
+    Nao usa sessao nem CSRF (nao ha navegador do outro lado): autentica pelo
+    header X-API-Token. As credenciais do Sigavi saem do .env, e o resultado
+    volta pelos destinos padrao do destinos.json — a API nao aceita destino
+    livre, entao ninguem consegue usar o robo pra mandar planilha pra terceiros.
+    """
+    # Mesma resposta pros dois casos, de proposito: nao entrega pra quem esta
+    # sondando de fora se o problema foi a origem ou o token.
+    if API_SOMENTE_LOCAL and not chamada_e_local():
+        app.logger.warning("API: tentativa fora da porta interna (porta=%s)", request.environ.get("SERVER_PORT"))
+        return jsonify({"error": "nao autorizado"}), 401
+    if not api_token_ok():
+        return jsonify({"error": "nao autorizado"}), 401
+
+    # O modo CADASTRO (que ESCREVE no Sigavi) fica fora da API de proposito:
+    # pelo WhatsApp so se consulta.
+    mode = request.form.get("mode", "consulta")
+    if mode != "consulta":
+        return jsonify({"error": "a API aceita apenas mode=consulta"}), 400
+
+    sigavi_login = os.getenv("SIGAVI_LOGIN", "").strip()
+    sigavi_senha = os.getenv("SIGAVI_SENHA", "")
+    if not sigavi_login or not sigavi_senha:
+        return jsonify({"error": "SIGAVI_LOGIN/SIGAVI_SENHA ausentes no .env"}), 500
+
+    if has_active_job():
+        return jsonify({"error": "ja existe uma automacao em andamento"}), 409
+    cleanup_finished_job_files()
+
+    upload = request.files.get("planilha")
+    if not upload or not upload.filename:
+        return jsonify({"error": "envie uma planilha .xlsx"}), 400
+    if Path(secure_filename(upload.filename)).suffix.lower() != ".xlsx":
+        return jsonify({"error": "a planilha precisa estar no formato .xlsx"}), 400
+
+    try:
+        df, _sheet = ler_planilha_upload(upload)
+        validos, _email_col = dados_validos_planilha(df, mode)
+    except Exception as exc:
+        app.logger.warning("API: falha ao ler planilha: %s", exc)
+        return jsonify({"error": "nao foi possivel ler a planilha"}), 400
+    if validos == 0:
+        return jsonify({"error": "a planilha nao tem nenhuma linha com e-mail"}), 400
+
+    upload.stream.seek(0)
+    # Destino do resultado: so passa o que estiver na lista curada do
+    # destinos.json (validar_destinos = allowlist). Se o bot nao pedir nada,
+    # cai nos padrao:true. Assim nao da pra mandar planilha pra numero
+    # arbitrario passado na requisicao.
+    todos = carregar_destinos()
+    destinos = validar_destinos(request.form.getlist("destinos"))
+    if not destinos:
+        destinos = [d["id"] for d in todos if d["padrao"]]
+    nomes = {d["id"]: d["nome"] for d in todos}
+    job_id = _iniciar_job(
+        upload.read(),
+        upload.filename,
+        mode,
+        sigavi_login,
+        sigavi_senha,
+        headless=True,
+        destinos=destinos,
+        extra_logs=["Job disparado pelo Eriquizinho (WhatsApp).\n"],
+    )
+    return jsonify({
+        "job_id": job_id,
+        "linhas": validos,
+        "destinos": destinos,
+        "destinos_nomes": [nomes.get(i, i) for i in destinos],
+    })
+
+
 @app.get("/health")
 def health():
     return jsonify({"ok": True})
