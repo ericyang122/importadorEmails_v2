@@ -114,6 +114,13 @@ COLUNAS_RENOMEAR = {
 RE_FAC_COL = re.compile(r"^\s*(fac|n[º°o]?\.?\s*fac|numero|n[º°o])\s*$", re.IGNORECASE)
 RE_NOME_COL = re.compile(r"(nome|cliente)", re.IGNORECASE)
 RE_EMAIL_COL = re.compile(r"e.?mail", re.IGNORECASE)
+# Modo Verificar busca POR telefone: a planilha pode chamar a coluna de varios jeitos
+RE_TEL_COL = re.compile(r"(telefone|celular|fone|whats|phone)", re.IGNORECASE)
+
+MODOS = {"consulta", "cadastro", "verificar"}
+# modos que so LEEM o Sigavi (o Verificar usa a mesma maquina paralela da Consulta)
+MODOS_LEITURA = {"consulta", "verificar"}
+ROTULO_MODO = {"consulta": "Consulta", "cadastro": "Cadastro", "verificar": "Verificar cadastro"}
 
 
 def _detectar_coluna(df, regex, full=False):
@@ -174,10 +181,14 @@ def ler_planilha_upload(upload):
 
 def dados_validos_planilha(df, mode):
     email_col = _detectar_coluna(df, RE_EMAIL_COL)
-    if mode == "consulta":
-        # vale a linha que tiver QUALQUER criterio de busca: FAC, email ou nome.
+    if mode in MODOS_LEITURA:
+        # vale a linha que tiver QUALQUER criterio de busca: FAC, email ou nome
+        # (no Verificar, telefone tambem).
         fac_col = _detectar_coluna(df, RE_FAC_COL, full=True)
         nome_col = _detectar_coluna(df, RE_NOME_COL) or ("NOME" if "NOME" in df.columns else None)
+        tel_col = None
+        if mode == "verificar":
+            tel_col = "FONE2" if "FONE2" in df.columns else _detectar_coluna(df, RE_TEL_COL)
 
         def _preenchido(col):
             if not col or col not in df.columns:
@@ -185,7 +196,7 @@ def dados_validos_planilha(df, mode):
             return df[col].apply(lambda v: str(v).strip().lower() not in {"", "nan", "none"})
 
         mask = None
-        for col in (fac_col, email_col, nome_col):
+        for col in (fac_col, email_col, nome_col, tel_col):
             m = _preenchido(col)
             if m is None:
                 continue
@@ -331,14 +342,16 @@ def _formatar_duracao(started_at, finished_at):
 
 def montar_resumo(job, n_anexos=0, saudacao=False):
     progress = job.get("progress") or {}
-    is_consulta = job.get("mode") == "consulta"
+    modo = job.get("mode")
     titulo = {
         "completed": "✅ *Automação concluída*",
         "stopped": "⏸️ *Automação parada* (resultados salvos)",
         "failed": "❌ *Automação finalizada com erro*",
     }.get(job.get("status"), "*Automação finalizada*")
-    rotulo_sucesso = "telefones encontrados" if is_consulta else "leads cadastrados"
-    rotulo_pendente = "não encontrados" if is_consulta else "duplicados/não cadastrados"
+    rotulo_sucesso, rotulo_pendente = {
+        "consulta": ("telefones encontrados", "não encontrados"),
+        "verificar": ("já têm cadastro no Sigavi", "sem cadastro"),
+    }.get(modo, ("leads cadastrados", "duplicados/não cadastrados"))
 
     total = progress.get("total", 0) or 0
     processados = progress.get("processados", 0) or 0
@@ -367,7 +380,7 @@ def montar_resumo(job, n_anexos=0, saudacao=False):
     partes = cabecalho + [
         linha,
         f"📄 {job.get('filename', '')}",
-        f"⚙️ {'Consulta' if is_consulta else 'Cadastro'}   ·   ⏱️ {_formatar_duracao(job.get('started_at'), job.get('finished_at'))}",
+        f"⚙️ {ROTULO_MODO.get(modo, 'Cadastro')}   ·   ⏱️ {_formatar_duracao(job.get('started_at'), job.get('finished_at'))}",
         f"📊 {processados}/{total} processados",
         "",
         "*Resultado*",
@@ -375,7 +388,7 @@ def montar_resumo(job, n_anexos=0, saudacao=False):
         f"➖ {pendentes} {rotulo_pendente}",
         f"⚠️ {erros} erro(s)",
         linha,
-        f"🎯 Taxa de sucesso: *{taxa}%*",
+        f"🎯 {'Com cadastro' if modo == 'verificar' else 'Taxa de sucesso'}: *{taxa}%*",
     ]
     if n_anexos:
         partes.append(f"📎 {n_anexos} planilha(s) em anexo")
@@ -528,7 +541,7 @@ def _iniciar_job(excel_bytes, display_name, mode, sigavi_login, sigavi_senha, he
     shutil.copy2(excel_path, backup_dir / f"entrada_{secure_name}")
 
     logs = [
-        f"Modo selecionado: {'Somente consulta' if mode == 'consulta' else 'Somente cadastro'}\n",
+        f"Modo selecionado: {ROTULO_MODO.get(mode, mode)}\n",
         f"Planilha recebida: {display_name}\n",
         f"Backup criado em: {backup_dir}\n",
     ]
@@ -624,7 +637,7 @@ def create_job():
 
     if not sigavi_login or not sigavi_senha:
         return jsonify({"error": "Informe login e senha do Sigavi."}), 400
-    if mode not in {"consulta", "cadastro"}:
+    if mode not in MODOS:
         return jsonify({"error": "Modo de execucao invalido."}), 400
     if not upload or not upload.filename:
         return jsonify({"error": "Envie uma planilha .xlsx."}), 400
@@ -641,7 +654,7 @@ def create_job():
         app.logger.warning("Falha ao ler planilha (previa): %s", exc)
         return jsonify({"error": "Nao foi possivel ler a planilha."}), 400
     if validos == 0:
-        requisito = "e-mail" if mode == "consulta" else "telefone valido"
+        requisito = {"consulta": "e-mail", "verificar": "telefone, e-mail, FAC ou nome"}.get(mode, "telefone valido")
         return jsonify({"error": f"A planilha nao possui nenhuma linha com {requisito}."}), 400
 
     upload.stream.seek(0)
@@ -766,8 +779,8 @@ def reprocess_errors(job_id):
         return jsonify({"error": "Informe login e senha do Sigavi para reprocessar."}), 400
 
     mode = snapshot.get("mode", "consulta")
-    status_erro = "erro_consulta" if mode == "consulta" else "erro_cadastro"
-    chave_resultados = "resultados_email" if mode == "consulta" else "resultados_cadastro"
+    status_erro = "erro_consulta" if mode in MODOS_LEITURA else "erro_cadastro"
+    chave_resultados = "resultados_email" if mode in MODOS_LEITURA else "resultados_cadastro"
 
     backup_dir = Path(snapshot.get("backup_dir", ""))
     progresso_path = backup_dir / "progresso.json"
@@ -839,7 +852,7 @@ def preview_planilha():
         return jsonify({"error": "Formato invalido. Use .xlsx."}), 400
 
     mode = request.form.get("mode", "consulta")
-    if mode not in {"consulta", "cadastro"}:
+    if mode not in MODOS:
         return jsonify({"error": "Modo de execucao invalido."}), 400
     try:
         import pandas as pd
@@ -857,11 +870,12 @@ def preview_planilha():
     empreend_col = next((c for c in df.columns if "EMPREEND" in str(c).upper()), None)
     fac_col = _detectar_coluna(df, RE_FAC_COL, full=True)
     nome_col = _detectar_coluna(df, RE_NOME_COL) or ("NOME" if "NOME" in df.columns else None)
+    tel_col = "FONE2" if "FONE2" in df.columns else _detectar_coluna(df, RE_TEL_COL)
     mapa_exibicao = [
         ("FAC", fac_col),
         ("Nome", nome_col),
         ("Email", email_col),
-        ("Telefone", "FONE2"),
+        ("Telefone", tel_col),
         ("Corretor", "CORRETOR DE ORIGEM"),
         ("Empreendimento", empreend_col),
     ]
@@ -872,7 +886,22 @@ def preview_planilha():
     #  - consulta: basta UM criterio de busca (FAC, email ou nome) — a automacao
     #    busca telefone+email no Sigavi a partir dele, nessa ordem de prioridade;
     #  - cadastro: precisa de Nome, Telefone, Corretor e Empreendimento.
-    if mode == "consulta":
+    if mode == "verificar":
+        if tem["FAC"] or tem["Telefone"] or tem["Email"] or tem["Nome"]:
+            faltando = []
+            status_previa = "ok"
+            criterios = [r for r in ("FAC", "Telefone", "Email", "Nome") if tem[r]]
+            mensagem_previa = (
+                f"Planilha OK — {validos} linha(s) pra verificar se já têm cadastro no Sigavi "
+                f"(busca por {', '.join(c.lower() for c in criterios)}, nessa ordem)."
+            )
+            if criterios == ["Nome"]:
+                mensagem_previa += " Só tem nome: pode dar homônimo, confira o resultado."
+        else:
+            faltando = ["Telefone/Email/FAC/Nome"]
+            status_previa = "aviso"
+            mensagem_previa = "Nenhuma coluna de telefone, e-mail, FAC ou nome encontrada."
+    elif mode == "consulta":
         if tem["FAC"] or tem["Email"] or tem["Nome"]:
             faltando = []
             status_previa = "ok"
@@ -969,10 +998,10 @@ def api_create_job():
         return jsonify({"error": "nao autorizado"}), 401
 
     # O modo CADASTRO (que ESCREVE no Sigavi) fica fora da API de proposito:
-    # pelo WhatsApp so se consulta.
+    # pelo WhatsApp so os modos de LEITURA (consulta e verificar).
     mode = request.form.get("mode", "consulta")
-    if mode != "consulta":
-        return jsonify({"error": "a API aceita apenas mode=consulta"}), 400
+    if mode not in MODOS_LEITURA:
+        return jsonify({"error": "a API aceita apenas mode=consulta ou mode=verificar"}), 400
 
     sigavi_login = os.getenv("SIGAVI_LOGIN", "").strip()
     sigavi_senha = os.getenv("SIGAVI_SENHA", "")
@@ -996,7 +1025,8 @@ def api_create_job():
         app.logger.warning("API: falha ao ler planilha: %s", exc)
         return jsonify({"error": "nao foi possivel ler a planilha"}), 400
     if validos == 0:
-        return jsonify({"error": "a planilha nao tem nenhuma linha com e-mail"}), 400
+        requisito = "telefone, e-mail, FAC ou nome" if mode == "verificar" else "e-mail"
+        return jsonify({"error": f"a planilha nao tem nenhuma linha com {requisito}"}), 400
 
     upload.stream.seek(0)
     # Destino do resultado: so passa o que estiver na lista curada do

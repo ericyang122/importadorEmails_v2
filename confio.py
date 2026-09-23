@@ -6,6 +6,7 @@ import os
 import sys
 import unicodedata
 import threading
+from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal, InvalidOperation
 import pandas as pd
@@ -40,9 +41,10 @@ def parse_args():
     )
     parser.add_argument(
         "--mode",
-        choices=("consulta", "cadastro"),
+        choices=("consulta", "cadastro", "verificar"),
         default=os.getenv("SIGAVI_MODE", "consulta"),
-        help="Modo de execucao: consulta busca telefones por email; cadastro cadastra leads com telefone.",
+        help=("Modo de execucao: consulta busca telefones por email; cadastro cadastra leads com telefone; "
+              "verificar diz se cada linha JA TEM cadastro no Sigavi (e qual FAC/corretor/situacao)."),
     )
     parser.add_argument(
         "--stop-file",
@@ -705,20 +707,11 @@ def extrair_contato_do_html(html):
     # sem grade e sem confirmacao textual -> resposta anomala (provavel throttle)
     return None, None, 'suspeito'
 
-def buscar_contato(session, csrf_token, numero='', email='', cliente=''):
-    """Busca telefone + email de um lead no Fac do Sigavi.
-
-    Preenche UM criterio de busca conforme o que a planilha tiver (a prioridade
-    fica no chamador): por numero da FAC, por email, ou por nome do cliente.
-    Retorna (telefone|None, email|None, erro|None).
-
-    Seguro para uso em paralelo: a renovacao de sessao expirada acontece sob
-    _token_lock, ja que mexe nos cookies do driver Selenium (nao thread-safe).
-    """
-    global req_csrf_token
-    payload = {
+def _payload_busca(numero='', email='', cliente='', telefone=''):
+    """Formulario da busca do /CRM/Fac com UM criterio preenchido (o resto neutro).
+    O __RequestVerificationToken entra na hora do POST."""
+    return {
         'FacBusca': 'true',
-        '__RequestVerificationToken': csrf_token,
         'Numero': str(numero or ''), 'Fase0': 'false', 'Fase1': 'false', 'Fase2': 'false',
         'Fase3': 'false', 'Fase4': 'false', 'Fase5': 'false',
         'RetornoVisita': 'false', 'FaseAnalise': 'false',
@@ -732,7 +725,7 @@ def buscar_contato(session, csrf_token, numero='', email='', cliente=''):
         'EmpreendimentoUsados': '', 'TarefaAgendada': '', 'IdAgencia': '',
         'EquipeOrigem': 'false', 'CorretorOrigem': 'false', 'ParceriaInterna': 'false',
         'EquipeGerente2': '', 'Cliente': cliente or '', 'Email': email or '',
-        'DDI': '', 'Telefone': '', 'CpfCnpj': '',
+        'DDI': '', 'Telefone': telefone or '', 'CpfCnpj': '',
         'Compra': 'false', 'Locacao': 'false', 'IdFinalidade': '0',
         'Dormitorio': '0,10', 'Suite': '0,10', 'Vaga': '0,10',
         'AreaTotal': '50,500', 'ValorDe': '0', 'ValorAte': '0',
@@ -744,6 +737,25 @@ def buscar_contato(session, csrf_token, numero='', email='', cliente=''):
         'IncluirHistoricoEmpreendimento': 'false', 'CentralAtendimentoHistorico': 'false',
         'X-Requested-With': 'XMLHttpRequest',
     }
+
+
+def _sessao_expirada_resp(r):
+    return 'ReturnUrl' in r.url or 'Login' in r.url or 'login' in r.text[:500].lower()
+
+
+def buscar_contato(session, csrf_token, numero='', email='', cliente=''):
+    """Busca telefone + email de um lead no Fac do Sigavi.
+
+    Preenche UM criterio de busca conforme o que a planilha tiver (a prioridade
+    fica no chamador): por numero da FAC, por email, ou por nome do cliente.
+    Retorna (telefone|None, email|None, erro|None).
+
+    Seguro para uso em paralelo: a renovacao de sessao expirada acontece sob
+    _token_lock, ja que mexe nos cookies do driver Selenium (nao thread-safe).
+    """
+    global req_csrf_token
+    payload = _payload_busca(numero=numero, email=email, cliente=cliente)
+
     def _sessao_expirada(r):
         return 'ReturnUrl' in r.url or 'Login' in r.url or 'login' in r.text[:500].lower()
 
@@ -943,7 +955,7 @@ print("Login no Sigavi confirmado.")
 # =========================
 req_session = None
 req_csrf_token = None
-if MODE == 'consulta':
+if MODE in ('consulta', 'verificar'):
     req_session = criar_session_requests()
     req_csrf_token = obter_csrf_token(req_session)
     if req_csrf_token:
@@ -978,6 +990,15 @@ _nome_col = ('NOME' if 'NOME' in df.columns else
 if _nome_col:
     print(f"Coluna de nome detectada: '{_nome_col}'")
 
+# coluna de telefone: o rename ja traz TELEFONE/celular como FONE2, mas planilha
+# de marketing vem com "Telefone", "Celular", "WhatsApp", "Phone"... (verificar
+# busca POR telefone, entao aqui nao pode depender da grafia exata)
+_tel_col = ('FONE2' if 'FONE2' in df.columns else
+            next((c for c in df.columns
+                  if re.search(r'(telefone|celular|fone|whats|phone)', str(c), re.IGNORECASE)), None))
+if MODE == 'verificar' and _tel_col:
+    print(f"Coluna de telefone detectada: '{_tel_col}'")
+
 # =========================
 # LOOP DE CADASTRO
 # =========================
@@ -988,7 +1009,9 @@ _ultimo_index, resultados_email, resultados_cadastro = carregar_progresso()
 # Pedro, pra Marketing revisar depois quem caiu nessa regra.
 resultados_corretor_inativo = []
 
-if MODE == 'consulta':
+if MODE == 'verificar':
+    print("Modo selecionado: verificar cadastro (so leitura).")
+elif MODE == 'consulta':
     print("Modo selecionado: somente consulta.")
 else:
     print("Modo selecionado: somente cadastro.")
@@ -1015,7 +1038,18 @@ def _salvar_excel_resultado(anunciar=False):
     os.makedirs(RESULT_DIR, exist_ok=True)
     arquivos_gerados = []
 
-    if MODE == 'consulta':
+    if MODE == 'verificar':
+        df_todos = pd.DataFrame(resultados_email, columns=COLUNAS_VERIFICAR)
+        if df_todos.empty:
+            df_todos = pd.DataFrame(columns=COLUNAS_VERIFICAR)
+        # a coluna Status e interna (conta progresso/reprocesso); na planilha
+        # quem fala e o nome do arquivo (com_cadastro / sem_cadastro)
+        relatorios = {
+            'com_cadastro': df_todos[df_todos['Status'] == 'encontrado'].drop(columns=['Status']).reset_index(drop=True),
+            'sem_cadastro': df_todos[df_todos['Status'] == 'nao_encontrado'].drop(columns=['Status']).reset_index(drop=True),
+            'erros_consulta': df_todos[df_todos['Status'] == 'erro_consulta'].drop(columns=['Status']).reset_index(drop=True),
+        }
+    elif MODE == 'consulta':
         colunas = ['Linha', 'Nome', 'Email', 'Telefone', 'Status', 'Detalhe']
         df_todos = pd.DataFrame(resultados_email, columns=colunas)
         if df_todos.empty:
@@ -1056,7 +1090,14 @@ def _salvar_excel_resultado(anunciar=False):
     if anunciar:
         for arquivo in arquivos_gerados:
             print(f"RESULT_FILE={arquivo}")
-        if MODE == 'consulta':
+        if MODE == 'verificar':
+            print(
+                "Resumo verificacao: "
+                f"{len(relatorios['com_cadastro'])} com cadastro, "
+                f"{len(relatorios['sem_cadastro'])} sem cadastro, "
+                f"{len(relatorios['erros_consulta'])} erro(s)."
+            )
+        elif MODE == 'consulta':
             print(
                 "Resumo consulta: "
                 f"{len(relatorios['encontrados'])} encontrado(s), "
@@ -1087,7 +1128,7 @@ def emitir_progresso():
     sucessos antigos quando o buffer de log rotaciona.
     """
     total = len(df)
-    if MODE == 'consulta':
+    if MODE in ('consulta', 'verificar'):
         sucessos = sum(1 for r in resultados_email if r['Status'] == 'encontrado')
         pendentes_ct = sum(1 for r in resultados_email if r['Status'] == 'nao_encontrado')
         erros = sum(1 for r in resultados_email if r['Status'] == 'erro_consulta')
@@ -1170,7 +1211,225 @@ def _processar_linha_consulta(index, row):
     return _resultado('nao_encontrado', tel_final, email_final, f'Nao encontrado por {criterio}.')
 
 
-if MODE == 'consulta':
+# =========================
+# MODO VERIFICAR: esta linha JA TEM cadastro no Sigavi?
+# =========================
+# Pedido de 23/09: planilha que so tem telefone (ou email) e a pergunta nao e
+# "qual o telefone" e sim "essa pessoa ja e nossa? com quem? em que situacao?".
+# A grade da busca do /CRM/Fac traz tudo isso, e a busca por telefone la INCLUI
+# as FACs finalizadas (a API REST so devolve as "Em Atendimento").
+COLUNAS_VERIFICAR = [
+    'Linha', 'Nome', 'Telefone', 'Email', 'Status', 'Buscado por', 'Qtd FACs',
+    'FAC', 'Situacao', 'Cadastro', 'Atualizacao', 'Equipe', 'Corretor',
+    'Cliente no Sigavi', 'Telefone no Sigavi', 'Email no Sigavi', 'Canal', 'Midia',
+    'Empreendimento', 'Situacao Atendimento', 'Motivo Finalizacao', 'Outras FACs', 'Detalhe',
+]
+# cabecalho da grade do Sigavi -> coluna da planilha de resultado
+_GRADE_PARA_COLUNA = {
+    'fac': 'FAC', 'situacao': 'Situacao', 'cadastro': 'Cadastro', 'atualizacao': 'Atualizacao',
+    'equipe': 'Equipe', 'corretor': 'Corretor', 'cliente': 'Cliente no Sigavi',
+    'telefone': 'Telefone no Sigavi', 'email': 'Email no Sigavi', 'canal': 'Canal', 'midia': 'Midia',
+    'empreendimento': 'Empreendimento', 'situacao atendimento': 'Situacao Atendimento',
+    'motivo finalizacao': 'Motivo Finalizacao',
+}
+
+
+class _GradeParser(HTMLParser):
+    """Junta o texto de cada <th>/<td>, tabela por tabela (stdlib, sem bs4).
+
+    A grade do Sigavi e um Kendo 'dividido': o cabecalho (th) vem numa tabela e
+    as linhas (td) em outra. Por isso guardamos tudo e casamos depois."""
+
+    def __init__(self):
+        super().__init__()
+        self.cabecalhos, self.linhas = [], []
+        self._cel = None
+        self._linha = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'tr':
+            self._linha = []
+        elif tag in ('th', 'td'):
+            self._cel = [tag, '']
+
+    def handle_data(self, data):
+        if self._cel is not None:
+            self._cel[1] += data
+
+    def handle_endtag(self, tag):
+        if tag in ('th', 'td') and self._cel is not None:
+            texto = ' '.join(self._cel[1].split())
+            if self._cel[0] == 'th':
+                self.cabecalhos.append(texto)
+            elif self._linha is not None:
+                self._linha.append(texto)
+            self._cel = None
+        elif tag == 'tr' and self._linha is not None:
+            if self._linha:
+                self.linhas.append(self._linha)
+            self._linha = None
+
+
+def _data_br(txt):
+    """'21/11/2025 10:25' -> (2025,11,21,10,25) pra ordenar; vazio vai pro fim."""
+    m = re.match(r'(\d{2})/(\d{2})/(\d{4})(?:\s+(\d{2}):(\d{2}))?', txt or '')
+    if not m:
+        return (0,)
+    d, mes, a, h, mi = m.groups()
+    return (int(a), int(mes), int(d), int(h or 0), int(mi or 0))
+
+
+def ler_grade_facs(html):
+    """Devolve (facs, total, classificacao) da resposta do /CRM/Fac/Busca.
+
+    classificacao: 'encontrado' | 'sem_resultado' | 'suspeito' (mesma ideia do
+    extrair_contato_do_html: resposta anomala = throttle, retentar)."""
+    p = _GradeParser()
+    p.feed(html)
+    chaves = [normalizar_texto(c).lower() for c in p.cabecalhos]
+    facs = []
+    if 'fac' in chaves:
+        for cel in p.linhas:
+            # as 2 primeiras celulas da linha sao colunas de acao sem cabecalho
+            # de texto; alinha pelo fim quando a contagem difere
+            if len(cel) < len(chaves) - 2:
+                continue
+            desloc = len(cel) - len(chaves)
+            registro = {}
+            for i, chave in enumerate(chaves):
+                j = i + desloc
+                if chave in _GRADE_PARA_COLUNA and 0 <= j < len(cel):
+                    registro[_GRADE_PARA_COLUNA[chave]] = cel[j]
+            if re.fullmatch(r'\d+', registro.get('FAC', '')):
+                facs.append(registro)
+    m = re.search(r'Exibindo\s+itens\s+\d+\s*-\s*\d+\s+de\s+(\d+)', html, re.IGNORECASE)
+    total = int(m.group(1)) if m else len(facs)
+    if facs:
+        return facs, max(total, len(facs)), 'encontrado'
+    html_lower = html.lower()
+    if 'fac' in chaves or any(k in html_lower for k in (
+            'não retornou', 'nao retornou', 'sem resultado', 'nenhum registro',
+            'nao foram encontrados', 'não foram encontrados')):
+        return [], 0, 'sem_resultado'
+    return [], 0, 'suspeito'
+
+
+def buscar_facs(session, csrf_token, numero='', email='', cliente='', telefone=''):
+    """Mesma busca do buscar_contato, mas devolve as FACs inteiras.
+
+    Retorna (facs, total, erro). Reaproveita o payload e a renovacao de sessao
+    do buscar_contato pra nao ter dois jeitos de falar com o Sigavi."""
+    global req_csrf_token
+    headers = {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'Accept': '*/*'}
+    payload = _payload_busca(numero=numero, email=email, cliente=cliente, telefone=telefone)
+    ultimo_erro = None
+    for tentativa in range(1, CONSULTA_TENTATIVAS + 1):
+        try:
+            token_atual = req_csrf_token or csrf_token
+            resp = session.post(URL_FAC_BUSCA, data={**payload, '__RequestVerificationToken': token_atual},
+                                headers=headers, timeout=40)
+            if resp.status_code == 200 and _sessao_expirada_resp(resp):
+                with _token_lock:
+                    for cookie in driver.get_cookies():
+                        session.cookies.set(cookie['name'], cookie['value'])
+                    novo_token = obter_csrf_token(session)
+                    if novo_token:
+                        req_csrf_token = novo_token
+                resp = session.post(URL_FAC_BUSCA, data={**payload, '__RequestVerificationToken': req_csrf_token},
+                                    headers=headers, timeout=40)
+                if _sessao_expirada_resp(resp):
+                    ultimo_erro = 'Sessao expirada mesmo apos renovar cookies.'
+                    time.sleep(CONSULTA_BACKOFF * tentativa)
+                    continue
+            if resp.status_code == 200:
+                facs, total, classificacao = ler_grade_facs(resp.text)
+                if classificacao != 'suspeito':
+                    return facs, total, None
+                ultimo_erro = f'Resposta suspeita ({len(resp.text)} chars) - possivel limite do Sigavi.'
+            else:
+                ultimo_erro = f'Status HTTP inesperado: {resp.status_code}'
+        except Exception as e:
+            ultimo_erro = str(e)
+        time.sleep(CONSULTA_BACKOFF * tentativa)
+    return [], 0, ultimo_erro
+
+
+def _variantes_telefone(bruto):
+    """Telefone da planilha -> formas pra tentar no Sigavi (busca e match EXATO).
+
+    Tira o 55 do DDI; se for celular de 11 digitos, tenta tambem sem o 9 (ficha
+    antiga cadastrada no formato de 8 digitos)."""
+    d = re.sub(r'\D', '', str(bruto or ''))
+    if d.startswith('55') and len(d) in (12, 13):
+        d = d[2:]
+    if d.startswith('0') and len(d) in (11, 12):
+        d = d[1:]
+    if len(d) not in (10, 11):
+        return []
+    variantes = [d]
+    if len(d) == 11 and d[2] == '9':
+        variantes.append(d[:2] + d[3:])
+    return variantes
+
+
+def _processar_linha_verificar(index, row):
+    """Diz se a linha ja tem cadastro no Sigavi. Ordem: FAC > telefone > email > nome.
+
+    Nome so entra quando nao ha mais nada (homonimo): o 'Buscado por' avisa."""
+    nome = str(row.get(_nome_col) or '').strip() if _nome_col else ''
+    if nome.lower() in ('nan', 'none'):
+        nome = ''
+    email_raw = str(row.get(_email_col) or '').strip() if _email_col else ''
+    if email_raw.lower() in ('nan', 'none'):
+        email_raw = ''
+    fac = re.sub(r'\D', '', str(row.get(_fac_col) or '')) if _fac_col else ''
+    tel_raw = normalizar_telefone_planilha(row.get(_tel_col)) if _tel_col else ''
+
+    base = {c: '' for c in COLUNAS_VERIFICAR}
+    base.update({'Linha': index + 1, 'Nome': nome, 'Telefone': tel_raw, 'Email': email_raw})
+
+    tentativas = []
+    if fac:
+        tentativas.append((f'FAC {fac}', {'numero': fac}))
+    for v in _variantes_telefone(tel_raw):
+        tentativas.append((f'telefone {v}', {'telefone': v}))
+    if email_raw:
+        tentativas.append(('email', {'email': email_raw}))
+    if not tentativas and nome:
+        tentativas.append(('nome (conferir: pode ser homonimo)', {'cliente': re.split(r'[|/]', nome)[0].strip()}))
+    if not tentativas:
+        return {**base, 'Status': 'erro_consulta', 'Detalhe': 'Linha sem FAC, telefone, email nem nome.'}
+    if not (req_session and req_csrf_token):
+        return {**base, 'Status': 'erro_consulta', 'Detalhe': 'Sessao de consulta indisponivel.'}
+
+    erros = []
+    for criterio, kwargs in tentativas:
+        facs, total, erro = buscar_facs(req_session, req_csrf_token, **kwargs)
+        if erro:
+            erros.append(f'{criterio}: {erro}')
+            continue
+        if facs:
+            # a FAC que vale e a mexida por ultimo; as outras vao listadas
+            facs.sort(key=lambda f: _data_br(f.get('Atualizacao')), reverse=True)
+            principal = facs[0]
+            outras = ', '.join(f"{f['FAC']} ({f.get('Situacao', '')}, {f.get('Corretor', '')})" for f in facs[1:])
+            detalhe = f'Encontrado por {criterio}.'
+            if total > len(facs):
+                detalhe += f' O Sigavi tem {total} FACs; a lista mostra as {len(facs)} primeiras.'
+            return {**base, **principal, 'Status': 'encontrado', 'Buscado por': criterio,
+                    'Qtd FACs': total, 'Outras FACs': outras, 'Detalhe': detalhe}
+    if erros and len(erros) == len(tentativas):
+        # nenhuma busca respondeu direito: nao da pra afirmar "sem cadastro"
+        return {**base, 'Status': 'erro_consulta', 'Detalhe': ' | '.join(erros)[:300]}
+    feitas = ', '.join(c for c, _ in tentativas)
+    detalhe = f'Nenhuma FAC por {feitas}.'
+    if erros:
+        detalhe += ' (falhou: ' + ' | '.join(erros)[:200] + ')'
+    return {**base, 'Status': 'nao_encontrado', 'Qtd FACs': 0, 'Detalhe': detalhe}
+
+
+if MODE in ('consulta', 'verificar'):
+    processar_linha = _processar_linha_verificar if MODE == 'verificar' else _processar_linha_consulta
     ultimo_processado = _ultimo_index
     pendentes = [(index, row) for index, row in df.iterrows() if index > _ultimo_index]
     # blocos: paraleliza a rede dentro do bloco e faz checkpoint ao fim de cada um
@@ -1194,7 +1453,7 @@ if MODE == 'consulta':
             resultados_bloco = {}
             with ThreadPoolExecutor(max_workers=CONSULTA_WORKERS) as executor:
                 futuros = {
-                    executor.submit(_processar_linha_consulta, index, row): index
+                    executor.submit(processar_linha, index, row): index
                     for index, row in bloco
                 }
                 for futuro in as_completed(futuros):
@@ -1206,8 +1465,13 @@ if MODE == 'consulta':
                 resultados_email.append(resultado)
                 processados += 1
                 marca = marcas.get(resultado['Status'], '?')
-                print(f"[{processados}/{total_pendentes}] linha {resultado['Linha']} "
-                      f"{resultado['Email']} [{marca}] {resultado['Telefone']}")
+                if MODE == 'verificar':
+                    quem = resultado['Telefone'] or resultado['Email'] or resultado['Nome'] or '-'
+                    print(f"[{processados}/{total_pendentes}] linha {resultado['Linha']} "
+                          f"{str(quem).replace(' ', '_')} [{marca}] {('FAC_' + resultado['FAC']) if resultado['FAC'] else ''}")
+                else:
+                    print(f"[{processados}/{total_pendentes}] linha {resultado['Linha']} "
+                          f"{resultado['Email']} [{marca}] {resultado['Telefone']}")
                 ultimo_processado = index
 
             salvar_estado(ultimo_processado)

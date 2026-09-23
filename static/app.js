@@ -77,7 +77,7 @@ function modoAtual() {
   return form.querySelector("[name='mode']:checked").value;
 }
 function rotuloModo(mode) {
-  return mode === "consulta" ? "Buscar telefones" : "Cadastrar leads";
+  return { consulta: "Buscar telefones", verificar: "Verificar cadastro" }[mode] || "Cadastrar leads";
 }
 
 // ===================== ESTADO DOS BOTÕES =====================
@@ -119,6 +119,9 @@ function aplicarModo() {
   if (mode === "consulta") {
     metricSuccessName.textContent = "Encontrados";
     metricPendingName.textContent = "Não encontrados";
+  } else if (mode === "verificar") {
+    metricSuccessName.textContent = "Com cadastro";
+    metricPendingName.textContent = "Sem cadastro";
   } else {
     metricSuccessName.textContent = "Cadastrados";
     metricPendingName.textContent = "Duplicados";
@@ -350,6 +353,12 @@ function traduzirLinha(linha) {
   if (m) {
     const email = nomeCurto(m[4]);
     const marca = m[5];
+    // Verificar: "[3/10] linha 3 11999998888 [✓] FAC_488368"
+    if (modoAtual() === "verificar") {
+      if (marca === "✓") return { cls: "ok", txt: `✅ Já tem cadastro — ${email}${m[6] ? ` (${m[6].replace("_", " ")})` : ""}` };
+      if (marca === "✗") return { cls: "warn", txt: `➖ Sem cadastro no Sigavi — ${email}` };
+      return { cls: "err", txt: `⚠️ Não consegui consultar ${email}` };
+    }
     if (marca === "✓") return { cls: "ok", txt: `✅ Telefone encontrado — ${email}${m[6] ? ` (${m[6]})` : ""}` };
     if (marca === "✗") return { cls: "warn", txt: `➖ Sem telefone para ${email}` };
     return { cls: "err", txt: `⚠️ Não consegui consultar ${email}` };
