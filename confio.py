@@ -177,7 +177,40 @@ if not os.path.exists(arquivo_excel):
 
 excel_file     = pd.ExcelFile(arquivo_excel)
 nome_planilha  = excel_file.sheet_names[0]
+# Planilha de controle vem com TITULO em cima ("CONTROLE DE ATENDIMENTOS SEMANAL
+# - CORA PINHEIROS") e o cabecalho so na 3a linha: lida do jeito normal, as
+# colunas viram "Unnamed" e nada e reconhecido. Se a 1a linha nao tem nenhuma
+# coluna conhecida, procura nas primeiras linhas a que tem.
+_RE_CABECALHO = re.compile(r"(telefone|celular|fone|whats|phone|e.?mail|nome|cliente|^\s*fac\s*$|corretor)", re.IGNORECASE)
+
+
+def _achar_linha_cabecalho(bruto, max_linhas=15):
+    """Indice (0-based) da linha que parece cabecalho, ou 0 se a 1a ja serve."""
+    if any(_RE_CABECALHO.search(str(c)) for c in bruto.columns if not str(c).startswith("Unnamed")):
+        return None
+    for i in range(min(max_linhas, len(bruto))):
+        valores = [str(v) for v in bruto.iloc[i].tolist() if str(v).strip().lower() not in ("", "nan", "none")]
+        if sum(1 for v in valores if _RE_CABECALHO.search(v)) >= 2:
+            return i + 1  # +1: a linha 0 do dataframe ja e a 2a da planilha
+    return None
+
+
+def _limpar_colunas(df):
+    """Tira espaco das pontas do nome da coluna ("TELEFONE " -> "TELEFONE") e
+    descarta coluna vazia sem nome (a coluna A em branco dessas planilhas)."""
+    df = df.rename(columns=lambda c: str(c).strip())
+    vazias = [c for c in df.columns if str(c).startswith("Unnamed") and df[c].isna().all()]
+    # linha em branco NAO sai: o "Linha" do resultado e a posicao no dataframe,
+    # e o reprocessar erros volta pra planilha por ela
+    return df.drop(columns=vazias)
+
+
 df             = pd.read_excel(arquivo_excel, sheet_name=nome_planilha)
+_linha_cab = _achar_linha_cabecalho(df)
+if _linha_cab:
+    df = pd.read_excel(arquivo_excel, sheet_name=nome_planilha, header=_linha_cab)
+    print(f"Cabecalho encontrado na linha {_linha_cab + 1} (tinha titulo em cima).")
+df = _limpar_colunas(df).reset_index(drop=True)
 print(f"Arquivo carregado: {arquivo_excel} | Aba: '{nome_planilha}' | {len(df)} linhas")
 
 df = df.rename(columns={
