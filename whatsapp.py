@@ -94,7 +94,7 @@ def enviar_arquivo(caminho, numero, legenda=""):
     resp.raise_for_status()
 
 
-def notificar(texto, arquivos=None, texto_grupo=None, destinos=None):
+def notificar(texto, arquivos=None, texto_grupo=None, destinos=None, legenda_no_anexo=False):
     """Envia o resumo e anexa os arquivos. Retorna (ok, mensagem).
 
     Silencioso e seguro: se nao houver configuracao, apenas informa. Qualquer
@@ -119,14 +119,21 @@ def notificar(texto, arquivos=None, texto_grupo=None, destinos=None):
     # os demais ainda vao. A pausa curta entre envios evita throttle do Baileys.
     for numero in destinos:
         msg = texto_grupo if (texto_grupo and _eh_grupo(numero)) else texto
+        resto = candidatos
         try:
-            enviar_texto(msg, numero)
+            if legenda_no_anexo and candidatos:
+                # resumo vai de legenda da 1a planilha: uma mensagem a menos
+                enviar_arquivo(candidatos[0], numero, legenda=msg)
+                resto = candidatos[1:]
+                time.sleep(1.5)
+            else:
+                enviar_texto(msg, numero)
         except Exception as exc:
             falhas.append(f"resumo para {numero} ({exc})")
             continue
 
         destinos_ok += 1
-        for arq in candidatos:
+        for arq in resto:
             try:
                 enviar_arquivo(arq, numero)
                 time.sleep(1.5)
