@@ -69,6 +69,10 @@ ARGS = parse_args()
 load_dotenv()
 SIGAVI_LOGIN = os.getenv("SIGAVI_LOGIN")
 SIGAVI_SENHA = os.getenv("SIGAVI_SENHA")
+# Conta reserva: se a principal for barrada/derrubada no meio do job e o relogin
+# nao voltar, troca pra ela em vez de marcar o resto da planilha como erro.
+SIGAVI_LOGIN_FALLBACK = os.getenv("SIGAVI_LOGIN_FALLBACK", "").strip()
+SIGAVI_SENHA_FALLBACK = os.getenv("SIGAVI_SENHA_FALLBACK", "")
 HEADLESS = ARGS.headless or os.getenv("SIGAVI_HEADLESS", "").strip().lower() in {"1", "true", "yes", "sim"}
 RESULT_DIR = ARGS.result_dir
 MODE = ARGS.mode
@@ -644,6 +648,67 @@ def obter_csrf_token(session):
         print(f"Erro ao obter CSRF token: {e}")
     return None
 
+def _sessao_busca_ok(session):
+    """Token so vale se a pagina do Fac abriu de verdade (a tela de login tambem
+    tem __RequestVerificationToken, entao 'achou token' nao prova sessao viva)."""
+    try:
+        resp = session.get(URL_FAC, timeout=20)
+    except Exception as e:
+        print(f"Erro ao checar sessao de busca: {e}")
+        return None
+    if _sessao_expirada_resp(resp):
+        return None
+    m = re.search(r'<input[^>]+name="__RequestVerificationToken"[^>]+value="([^"]+)"', resp.text)
+    return m.group(1) if m else None
+
+
+def _copiar_cookies(session):
+    for cookie in driver.get_cookies():
+        session.cookies.set(cookie['name'], cookie['value'])
+
+
+_sessao_geracao = 0
+
+
+def renovar_sessao_busca(session, geracao_vista):
+    """Renova a sessao da busca paralela. Chamar SEM segurar _token_lock.
+
+    Antes so copiava os cookies do driver — mas quando o Sigavi derruba a sessao
+    o driver tambem esta deslogado, entao nunca recuperava e TODO o resto da
+    planilha virava 'Sessao expirada' (job Leads_Abyara_continuacao, 25/09).
+    Agora: cookies -> relogin na conta atual -> conta reserva.
+    'geracao_vista' evita que as N threads reloguem N vezes a mesma queda."""
+    global req_csrf_token, _sessao_geracao, SIGAVI_LOGIN, SIGAVI_SENHA
+    with _token_lock:
+        if _sessao_geracao != geracao_vista and req_csrf_token:
+            return req_csrf_token  # outra thread ja renovou
+        _copiar_cookies(session)
+        token = _sessao_busca_ok(session)
+        if not token:
+            tentativas = [(SIGAVI_LOGIN, SIGAVI_SENHA)]
+            if SIGAVI_LOGIN_FALLBACK and SIGAVI_LOGIN_FALLBACK != SIGAVI_LOGIN:
+                tentativas.append((SIGAVI_LOGIN_FALLBACK, SIGAVI_SENHA_FALLBACK))
+            for login, senha in tentativas:
+                if login != SIGAVI_LOGIN:
+                    print("Conta principal nao voltou. Trocando pra conta reserva.")
+                    SIGAVI_LOGIN, SIGAVI_SENHA = login, senha
+                try:
+                    relogar_sigavi()
+                except Exception as e:
+                    print(f"Relogin falhou: {e}")
+                    time.sleep(10)
+                    continue
+                session.cookies.clear()
+                _copiar_cookies(session)
+                token = _sessao_busca_ok(session)
+                if token:
+                    break
+        if token:
+            req_csrf_token = token
+            _sessao_geracao += 1
+        return token
+
+
 def _e_fone_valido(d):
     if len(d) not in (10, 11):
         return False
@@ -799,6 +864,7 @@ def buscar_contato(session, csrf_token, numero='', email='', cliente=''):
     # quando esta sob carga, e isso nao pode virar falso "nao encontrado".
     for tentativa in range(1, CONSULTA_TENTATIVAS + 1):
         try:
+            geracao = _sessao_geracao
             token_atual = req_csrf_token or csrf_token
             resp = session.post(
                 URL_FAC_BUSCA,
@@ -809,14 +875,7 @@ def buscar_contato(session, csrf_token, numero='', email='', cliente=''):
             if resp.status_code == 200:
                 # sessão expirada → servidor retorna página de login
                 if _sessao_expirada(resp):
-                    # renova sob lock: driver.get_cookies() nao e thread-safe
-                    with _token_lock:
-                        for cookie in driver.get_cookies():
-                            session.cookies.set(cookie['name'], cookie['value'])
-                        novo_token = obter_csrf_token(session)
-                        if novo_token:
-                            req_csrf_token = novo_token
-                    token_atual = req_csrf_token
+                    token_atual = renovar_sessao_busca(session, geracao)
                     if not token_atual:
                         ultimo_erro = 'Sessao expirada e CSRF token nao foi renovado.'
                         time.sleep(CONSULTA_BACKOFF * tentativa)
@@ -1358,16 +1417,12 @@ def buscar_facs(session, csrf_token, numero='', email='', cliente='', telefone='
     ultimo_erro = None
     for tentativa in range(1, CONSULTA_TENTATIVAS + 1):
         try:
+            geracao = _sessao_geracao
             token_atual = req_csrf_token or csrf_token
             resp = session.post(URL_FAC_BUSCA, data={**payload, '__RequestVerificationToken': token_atual},
                                 headers=headers, timeout=40)
             if resp.status_code == 200 and _sessao_expirada_resp(resp):
-                with _token_lock:
-                    for cookie in driver.get_cookies():
-                        session.cookies.set(cookie['name'], cookie['value'])
-                    novo_token = obter_csrf_token(session)
-                    if novo_token:
-                        req_csrf_token = novo_token
+                renovar_sessao_busca(session, geracao)
                 resp = session.post(URL_FAC_BUSCA, data={**payload, '__RequestVerificationToken': req_csrf_token},
                                     headers=headers, timeout=40)
                 if _sessao_expirada_resp(resp):
