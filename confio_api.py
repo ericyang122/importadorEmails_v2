@@ -68,6 +68,9 @@ WORKERS = max(1, int(os.getenv("SIGAVI_API_WORKERS", "2")))
 # calado em toda linha sem empreendimento — o contrário do combinado (29/09).
 EMPREENDIMENTO_PADRAO = (os.getenv("SIGAVI_EMPREENDIMENTO_TELA") or "").strip()
 DRY_RUN = os.getenv("SIGAVI_DRY_RUN", "").strip().lower() in ("1", "true", "sim", "yes")
+# SÓ PRA TESTE (fora da tela): cria mesmo com o telefone já no Sigavi. Existe pra testar a
+# criação com o número do Erick, que já tem ficha (29/09). Nunca ligar no .env de produção.
+TESTE_IGNORA_DUPLICIDADE = os.getenv("SIGAVI_TESTE_IGNORA_DUPLICIDADE", "").strip().lower() in ("1", "true", "sim")
 
 # Canal de atendimento do cadastro. Não há rota de lista de canais na API; os IDs vêm
 # das FACs reais (conferido 29/09): "Carteira" do robô = CARTEIRA CORRETOR (ok do Erick).
@@ -712,7 +715,9 @@ def cadastrar_linha(index, row):
         antes = api.busca_facs(Telefone=telefone)
     except ErroSigavi as e:
         return registrar(index, nome, email_raw, telefone, 'erro_cadastro', f'Nao consegui checar duplicidade: {e}')
-    if antes:
+    if antes and TESTE_IGNORA_DUPLICIDADE:
+        print(f"AVISO (teste): telefone ja tem {len(antes)} FAC(s); criando mesmo assim.")
+    elif antes:
         print(f"[DUPLICADO] {telefone}")
         return registrar(index, nome, email_raw, telefone, 'duplicado', 'Telefone ja encontrado no Sigavi antes do cadastro.')
 
@@ -729,7 +734,9 @@ def cadastrar_linha(index, row):
                          f"SIMULACAO: criaria FAC com {apelido}/{equipe}, {CANAL_NOME_SIGAVI[canal]}, {midia['Nome']}, {nome_emp_sigavi}.")
 
     r = api.fac_salva(payload)
-    # confirma pela busca (o número que volta pode ser o Id interno, não o da FAC)
+    # confirma pela busca: a ficha nova é a que não existia antes (o número que o fac/salva
+    # devolve pode ser o Id interno, não o da FAC — ver sigavi_idfac_numero_diferente)
+    ja_existiam = {str(f.get('Numero')) for f in antes}
     numero = None
     for espera in (1, 2, 4, 8):
         time.sleep(espera)
@@ -737,8 +744,9 @@ def cadastrar_linha(index, row):
             depois = api.busca_facs(Telefone=telefone)
         except ErroSigavi:
             continue
-        if depois:
-            numero = _mais_recentes(depois)[0].get('Numero')
+        novas = [f for f in depois if str(f.get('Numero')) not in ja_existiam]
+        if novas:
+            numero = _mais_recentes(novas)[0].get('Numero')
             break
     if numero:
         obs = '' if r['ok'] else f" (o Sigavi respondeu erro — {r['erro']} — mas a ficha foi criada)"
