@@ -442,12 +442,20 @@ def notificar_whatsapp(job_id, result_dir):
     append_log(job_id, f"\n{msg}\n")
 
 
-def run_automation(job_id, excel_path, result_dir, progress_file, stop_file, log_path, mode, sigavi_login, sigavi_senha, headless):
+# Motor da automacao (29/09): "api" = confio_api.py (API REST do Sigavi, sem navegador);
+# "selenium" = confio.py (o robo antigo, que dirige o Chrome/Edge). Mesmo contrato de
+# entrada/saida — trocar e so mudar o .env e reiniciar, pros dois lados.
+MOTOR = os.getenv("IMPORTADOR_MOTOR", "selenium").strip().lower()
+SCRIPT_MOTOR = "confio_api.py" if MOTOR == "api" else "confio.py"
+
+
+def run_automation(job_id, excel_path, result_dir, progress_file, stop_file, log_path, mode, sigavi_login, sigavi_senha, headless,
+                   empreendimento=""):
     secrets_to_hide = [sigavi_login, sigavi_senha]
     command = [
         sys.executable,
         "-u",
-        str(BASE_DIR / "confio.py"),
+        str(BASE_DIR / SCRIPT_MOTOR),
         "--excel",
         str(excel_path),
         "--result-dir",
@@ -466,6 +474,8 @@ def run_automation(job_id, excel_path, result_dir, progress_file, stop_file, log
     env["SIGAVI_LOGIN"] = sigavi_login
     env["SIGAVI_SENHA"] = sigavi_senha
     env["PYTHONIOENCODING"] = "utf-8"
+    if empreendimento:
+        env["SIGAVI_EMPREENDIMENTO"] = empreendimento
 
     set_job_status(job_id, "running", started_at=datetime.now().isoformat(timespec="seconds"))
     append_log(job_id, "Automacao iniciada.\n", secrets_to_hide)
@@ -539,7 +549,8 @@ def run_automation(job_id, excel_path, result_dir, progress_file, stop_file, log
             shutil.rmtree(excel_path.parent, ignore_errors=True)
 
 
-def _iniciar_job(excel_bytes, display_name, mode, sigavi_login, sigavi_senha, headless, destinos=None, extra_logs=None):
+def _iniciar_job(excel_bytes, display_name, mode, sigavi_login, sigavi_senha, headless, destinos=None, extra_logs=None,
+                 empreendimento=""):
     """Cria o job, grava a planilha + backup e dispara a thread de execucao.
 
     Compartilhado por /jobs (upload novo) e /jobs/<id>/reprocess (so as linhas
@@ -585,6 +596,7 @@ def _iniciar_job(excel_bytes, display_name, mode, sigavi_login, sigavi_senha, he
             "backup_dir": str(backup_dir),
             "stop_file": str(stop_file),
             "destinos": list(destinos or []),
+            "empreendimento": empreendimento,
             "download_available": False,
             "result_files": [],
             "result_deleted_at": None,
@@ -594,7 +606,8 @@ def _iniciar_job(excel_bytes, display_name, mode, sigavi_login, sigavi_senha, he
 
     thread = threading.Thread(
         target=run_automation,
-        args=(job_id, excel_path, result_dir, progress_file, stop_file, log_path, mode, sigavi_login, sigavi_senha, headless),
+        args=(job_id, excel_path, result_dir, progress_file, stop_file, log_path, mode, sigavi_login, sigavi_senha, headless,
+              empreendimento),
         daemon=True,
     )
     thread.start()
@@ -657,6 +670,7 @@ def create_job():
     headless = request.form.get("headless") == "on"
     mode = request.form.get("mode", "consulta")
     destinos = validar_destinos(request.form.getlist("destinos"))
+    empreendimento = request.form.get("empreendimento", "").strip()
 
     if not sigavi_login or not sigavi_senha:
         return jsonify({"error": "Informe login e senha do Sigavi."}), 400
@@ -679,10 +693,15 @@ def create_job():
     if validos == 0:
         requisito = {"consulta": "e-mail", "verificar": "telefone, e-mail, FAC ou nome"}.get(mode, "telefone valido")
         return jsonify({"error": f"A planilha nao possui nenhuma linha com {requisito}."}), 400
+    # cadastro pela API: o empreendimento vem da planilha ou da tela — nunca mais fixo
+    if (mode == "cadastro" and MOTOR == "api" and not empreendimento
+            and not any("EMPREEND" in str(c).upper() for c in df.columns)):
+        return jsonify({"error": "A planilha nao tem coluna de empreendimento: escolha o empreendimento na tela."}), 400
 
     upload.stream.seek(0)
     excel_bytes = upload.read()
-    job_id = _iniciar_job(excel_bytes, upload.filename, mode, sigavi_login, sigavi_senha, headless, destinos=destinos)
+    job_id = _iniciar_job(excel_bytes, upload.filename, mode, sigavi_login, sigavi_senha, headless, destinos=destinos,
+                          empreendimento=empreendimento)
 
     return jsonify({"job_id": job_id})
 
@@ -856,7 +875,7 @@ def reprocess_errors(job_id):
     extra_logs = [f"Reprocessando {len(posicoes)} linha(s) com erro do job anterior.\n"]
     novo_job_id = _iniciar_job(
         excel_bytes, display_name, mode, sigavi_login, sigavi_senha, headless,
-        destinos=snapshot.get("destinos"), extra_logs=extra_logs
+        destinos=snapshot.get("destinos"), extra_logs=extra_logs, empreendimento=snapshot.get("empreendimento", "")
     )
 
     return jsonify({"job_id": novo_job_id, "reprocessadas": len(posicoes)})
@@ -944,11 +963,14 @@ def preview_planilha():
                 "Nenhuma coluna de FAC, e-mail ou nome encontrada. No modo Consulta a planilha precisa de pelo menos uma delas."
             )
     else:  # cadastro
-        necessarias = ["Nome", "Telefone", "Corretor", "Empreendimento"]
+        # pela API, sem coluna de empreendimento a pessoa escolhe na tela (campo abaixo)
+        necessarias = ["Nome", "Telefone", "Corretor"] + ([] if MOTOR == "api" else ["Empreendimento"])
         faltando = [c for c in necessarias if not tem[c]]
         if not faltando:
             status_previa = "ok"
             mensagem_previa = "Planilha de cadastro OK — todas as colunas necessárias foram encontradas."
+            if MOTOR == "api" and not tem["Empreendimento"]:
+                mensagem_previa += " Sem coluna de empreendimento: escolha o empreendimento no campo abaixo."
         else:
             status_previa = "aviso"
             mensagem_previa = (
@@ -1082,6 +1104,29 @@ def api_create_job():
         "destinos": destinos,
         "destinos_nomes": [nomes.get(i, i) for i in destinos],
     })
+
+
+_CACHE_EMP = {"quando": 0.0, "nomes": []}
+
+
+@app.get("/empreendimentos")
+@login_required
+def listar_empreendimentos():
+    """Nomes dos empreendimentos do Sigavi pro campo do cadastro (cache de 1h).
+    Usa a conta do .env (a mesma da /api/jobs) — so leitura."""
+    import time as _time
+    from sigavi_api import ErroSigavi, SigaviAPI
+    if _CACHE_EMP["nomes"] and _time.time() - _CACHE_EMP["quando"] < 3600:
+        return jsonify({"empreendimentos": _CACHE_EMP["nomes"]})
+    login, senha = os.getenv("SIGAVI_LOGIN", "").strip(), os.getenv("SIGAVI_SENHA", "")
+    if not login or not senha:
+        return jsonify({"error": "SIGAVI_LOGIN/SIGAVI_SENHA ausentes no .env"}), 500
+    try:
+        nomes = sorted({e["Nome"] for e in SigaviAPI(login, senha).empreendimentos() if e["Nome"]})
+    except ErroSigavi as exc:
+        return jsonify({"error": str(exc)}), 502
+    _CACHE_EMP.update(quando=_time.time(), nomes=nomes)
+    return jsonify({"empreendimentos": nomes})
 
 
 @app.get("/health")

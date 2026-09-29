@@ -108,6 +108,16 @@
           <p id="file-message" class="field-hint"></p>
         </div>
 
+        <!-- Empreendimento do cadastro (29/09): vem da coluna da planilha; sem a coluna,
+             escolhe aqui. Lista puxada do Sigavi. So aparece no modo Cadastrar. -->
+        <div class="field-block hidden" id="empreendimento-block">
+          <span class="field-label">Empreendimento dos leads</span>
+          <input type="text" name="empreendimento" id="empreendimento-input" list="empreendimentos-lista"
+                 placeholder="Comece a digitar o nome do empreendimento" autocomplete="off">
+          <datalist id="empreendimentos-lista"></datalist>
+          <p class="field-hint" id="empreendimento-hint">Usado nas linhas sem empreendimento na planilha.</p>
+        </div>
+
         <label class="checkbox-row">
           <input type="checkbox" name="headless" checked>
           Rodar o navegador em segundo plano (recomendado)

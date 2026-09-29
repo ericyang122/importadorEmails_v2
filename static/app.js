@@ -126,6 +126,30 @@ function aplicarModo() {
     metricSuccessName.textContent = "Cadastrados";
     metricPendingName.textContent = "Duplicados";
   }
+  const blocoEmp = document.querySelector("#empreendimento-block");
+  if (blocoEmp) {
+    blocoEmp.classList.toggle("hidden", mode !== "cadastro");
+    if (mode === "cadastro") carregarEmpreendimentos();
+  }
+}
+
+// Lista de empreendimentos do Sigavi pro campo do cadastro (carrega uma vez)
+let empreendimentosCarregados = false;
+async function carregarEmpreendimentos() {
+  if (empreendimentosCarregados) return;
+  const lista = document.querySelector("#empreendimentos-lista");
+  const hint = document.querySelector("#empreendimento-hint");
+  try {
+    const resp = await fetch("/empreendimentos");
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "falhou");
+    lista.innerHTML = data.empreendimentos
+      .map((nome) => `<option value="${nome.replace(/"/g, "&quot;")}"></option>`)
+      .join("");
+    empreendimentosCarregados = true;
+  } catch (err) {
+    if (hint) hint.textContent = "Não consegui a lista do Sigavi — digite o nome do empreendimento como está lá.";
+  }
 }
 form.querySelectorAll("[name='mode']").forEach((el) =>
   el.addEventListener("change", () => {
