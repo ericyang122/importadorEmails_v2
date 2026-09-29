@@ -474,8 +474,9 @@ def run_automation(job_id, excel_path, result_dir, progress_file, stop_file, log
     env["SIGAVI_LOGIN"] = sigavi_login
     env["SIGAVI_SENHA"] = sigavi_senha
     env["PYTHONIOENCODING"] = "utf-8"
+    env.pop("SIGAVI_EMPREENDIMENTO_TELA", None)
     if empreendimento:
-        env["SIGAVI_EMPREENDIMENTO"] = empreendimento
+        env["SIGAVI_EMPREENDIMENTO_TELA"] = empreendimento
 
     set_job_status(job_id, "running", started_at=datetime.now().isoformat(timespec="seconds"))
     append_log(job_id, "Automacao iniciada.\n", secrets_to_hide)

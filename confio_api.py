@@ -63,7 +63,10 @@ STOP_FILE = ARGS.stop_file
 AUTOSAVE_EVERY = max(1, ARGS.autosave_every)
 # a API do Sigavi derruba com paralelismo (503 a partir de ~3); 2 é o medido que aguenta
 WORKERS = max(1, int(os.getenv("SIGAVI_API_WORKERS", "2")))
-EMPREENDIMENTO_PADRAO = (os.getenv("SIGAVI_EMPREENDIMENTO") or "").strip()
+# Só o que veio da TELA (o app.py passa em SIGAVI_EMPREENDIMENTO_TELA). De propósito NÃO lê
+# o SIGAVI_EMPREENDIMENTO do .env: lá ainda mora o "arvo" do robô antigo, e ele entraria
+# calado em toda linha sem empreendimento — o contrário do combinado (29/09).
+EMPREENDIMENTO_PADRAO = (os.getenv("SIGAVI_EMPREENDIMENTO_TELA") or "").strip()
 DRY_RUN = os.getenv("SIGAVI_DRY_RUN", "").strip().lower() in ("1", "true", "sim", "yes")
 
 # Canal de atendimento do cadastro. Não há rota de lista de canais na API; os IDs vêm
@@ -223,7 +226,7 @@ _emp_col = next((c for c in df.columns if re.search(r'empreend', str(c), re.IGNO
 if MODE == 'cadastro':
     if _emp_col:
         print(f"Coluna de empreendimento detectada: '{_emp_col}'"
-              + (f" (vazio usa '{EMPREENDIMENTO_PADRAO}', escolhido na tela)" if EMPREENDIMENTO_PADRAO else ""))
+              + (f" (linha vazia usa '{EMPREENDIMENTO_PADRAO}', escolhido na tela)" if EMPREENDIMENTO_PADRAO else ""))
     elif EMPREENDIMENTO_PADRAO:
         print(f"Empreendimento escolhido na tela: '{EMPREENDIMENTO_PADRAO}' (a planilha nao tem coluna de empreendimento).")
     else:
