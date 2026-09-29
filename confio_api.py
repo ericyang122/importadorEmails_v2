@@ -11,7 +11,7 @@ O que muda por baixo (29/09/2026):
   * cadastro pelo `fac/salva` — nome, telefone, canal, mídia, corretor e empreendimento
     por ID, e o Sigavi devolve o número da ficha;
   * o empreendimento NÃO é mais fixo ("arvo"): vem da coluna da planilha ou do que foi
-    escolhido na tela (SIGAVI_EMPREENDIMENTO) — decisão do Erick, 29/09;
+    escolhido na tela (SIGAVI_EMPREENDIMENTO_TELA) — decisão do Erick, 29/09;
   * busca só por NOME não existe na API (o filtro `Cliente` é ignorado e devolve gente
     aleatória): linha que só tem nome sai "nao encontrado" dizendo isso, em vez de
     arriscar homônimo.
