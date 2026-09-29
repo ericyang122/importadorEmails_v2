@@ -372,64 +372,57 @@ def _formatar_duracao(started_at, finished_at):
     return f"{seg}s"
 
 
-def montar_resumo(job, n_anexos=0, saudacao=False):
+def montar_resumo(job):
+    """Resumo curto do WhatsApp (28/09: o grupo pediu menos mensagem).
+
+    Vai como legenda da primeira planilha; o detalhe esta nas planilhas.
+    """
     progress = job.get("progress") or {}
     modo = job.get("mode")
-    titulo = {
-        "completed": "✅ *Automação concluída*",
-        "stopped": "⏸️ *Automação parada* (resultados salvos)",
-        "failed": "❌ *Automação finalizada com erro*",
-    }.get(job.get("status"), "*Automação finalizada*")
     rotulo_sucesso, rotulo_pendente = {
-        "consulta": ("telefones encontrados", "não encontrados"),
-        "verificar": ("já têm cadastro no Sigavi", "sem cadastro"),
-    }.get(modo, ("leads cadastrados", "duplicados/não cadastrados"))
+        "consulta": ("encontrados", "não encontrados"),
+        "verificar": ("com cadastro", "sem cadastro"),
+    }.get(modo, ("cadastrados", "não cadastrados"))
 
     total = progress.get("total", 0) or 0
     processados = progress.get("processados", 0) or 0
     sucessos = progress.get("sucessos", 0) or 0
     pendentes = progress.get("pendentes", 0) or 0
     erros = progress.get("erros", 0) or 0
-    base = processados or total
-    taxa = round((sucessos / base) * 100) if base else 0
+    nome = job.get("filename", "")
 
-    try:
-        hora = datetime.fromisoformat(job.get("finished_at")).strftime("%H:%M")
-    except (TypeError, ValueError):
-        hora = ""
-
-    linha = "━━━━━━━━━━━━━━━"
-    if saudacao:
-        # Versao amigavel pro grupo do Marketing: apresentacao no lugar do titulo tecnico.
-        cabecalho = [
-            "👋 Olá! Tudo bem? Aqui é a *automação de importação de telefones e cadastro de leads*. 🤖",
-            "",
-            "Terminei de processar a planilha que me foi enviada — segue abaixo o resumo e as planilhas em anexo. 📎",
-            "",
-        ]
+    status = job.get("status")
+    if status == "completed":
+        titulo = f"✅ *{nome}* pronta"
+    elif status == "stopped":
+        titulo = f"⏸️ *{nome}* parada em {processados}/{total}"
     else:
-        cabecalho = [titulo]
-    partes = cabecalho + [
-        linha,
-        f"📄 {job.get('filename', '')}",
-        f"⚙️ {ROTULO_MODO.get(modo, 'Cadastro')}   ·   ⏱️ {_formatar_duracao(job.get('started_at'), job.get('finished_at'))}",
-        f"📊 {processados}/{total} processados",
-        "",
-        "*Resultado*",
-        f"✅ {sucessos} {rotulo_sucesso}",
-        f"➖ {pendentes} {rotulo_pendente}",
-        f"⚠️ {erros} erro(s)",
-        linha,
-        f"🎯 {'Com cadastro' if modo == 'verificar' else 'Taxa de sucesso'}: *{taxa}%*",
-    ]
-    if n_anexos:
-        partes.append(f"📎 {n_anexos} planilha(s) em anexo")
-    if hora:
-        partes.append(f"🕐 Concluído às {hora}")
-    if saudacao:
-        partes.append("")
-        partes.append("Qualquer coisa, é só chamar o Erick. 🙂")
-    return "\n".join(partes)
+        titulo = f"❌ *{nome}* deu erro em {processados}/{total}"
+    numeros = f"{sucessos} {rotulo_sucesso} · {pendentes} {rotulo_pendente}"
+    if erros:
+        numeros += f" · {erros} com erro de consulta"
+    return f"{titulo}\n{numeros}"
+
+
+def ordenar_anexos(job, arquivos):
+    """Encontrados primeiro, depois nao encontrados, erros por ultimo.
+
+    A planilha de erros so vai se tiver erro (sem erro ela vai so com cabecalho).
+    """
+    erros = ((job.get("progress") or {}).get("erros", 0) or 0)
+
+    def peso(caminho):
+        nome = Path(caminho).name.lower()
+        if "erro" in nome:
+            return 2
+        if "sem_" in nome or "nao_" in nome or "não_" in nome:
+            return 1
+        return 0
+
+    anexos = [a for a in arquivos if Path(a).exists() and Path(a).stat().st_size > 0]
+    if not erros:
+        anexos = [a for a in anexos if peso(a) != 2]
+    return sorted(anexos, key=peso)
 
 
 def notificar_whatsapp(job_id, result_dir):
@@ -441,13 +434,11 @@ def notificar_whatsapp(job_id, result_dir):
         snapshot = dict(job) if job else None
     if not snapshot or snapshot.get("status") not in {"completed", "stopped", "failed"}:
         return
-    arquivos = [entry["path"] for entry in result_file_entries(result_dir)]
-    anexaveis = [a for a in arquivos if Path(a).exists() and Path(a).stat().st_size > 0]
-    texto = montar_resumo(snapshot, n_anexos=len(anexaveis))
-    texto_grupo = montar_resumo(snapshot, n_anexos=len(anexaveis), saudacao=True)
+    arquivos = ordenar_anexos(snapshot, [entry["path"] for entry in result_file_entries(result_dir)])
+    texto = montar_resumo(snapshot)
     # Destinos escolhidos na tela; se vazio (ex.: JS falhou), cai no .env (seguro).
     destinos = snapshot.get("destinos") or None
-    ok, msg = whatsapp.notificar(texto, arquivos, texto_grupo=texto_grupo, destinos=destinos)
+    ok, msg = whatsapp.notificar(texto, arquivos, destinos=destinos, legenda_no_anexo=True)
     append_log(job_id, f"\n{msg}\n")
 
 
