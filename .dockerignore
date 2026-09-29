@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.venv
+venv
+__pycache__
+*.pyc
+*.log
+*.bak*
+backups
+uploads
+resultados
+evolution
+abertos
+*.xlsx
+.git

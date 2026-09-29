@@ -30,7 +30,13 @@ MAX_LOG_LINES = 2000
 RUNNING_STATUSES = {"queued", "running", "stopping"}
 XLSX_MIMETYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
-load_dotenv(BASE_DIR / ".env")
+# no Cloud Run o .env vem do Secret Manager montado como arquivo (IMPORTADOR_ENV_FILE)
+load_dotenv(os.getenv("IMPORTADOR_ENV_FILE") or BASE_DIR / ".env")
+# EXECUCAO=cloudrun: a automacao roda num Cloud Run Job e tudo que era pasta vira
+# bucket (ver nuvem.py). Sem isso, o comportamento e o de sempre na VM.
+NUVEM = os.getenv("EXECUCAO", "").strip().lower() == "cloudrun"
+if NUVEM:
+    import nuvem
 UPLOAD_ROOT.mkdir(exist_ok=True)
 BACKUP_ROOT.mkdir(exist_ok=True)
 
@@ -301,6 +307,8 @@ def append_log(job_id, line, secrets_to_hide=None):
 
 
 def has_active_job():
+    if NUVEM:
+        return nuvem.job_ativo() is not None
     with JOBS_LOCK:
         return any(job["status"] in RUNNING_STATUSES for job in JOBS.values())
 
@@ -357,72 +365,7 @@ def register_result_files(job_id, result_dir):
         job["result_files"] = entries
 
 
-def _formatar_duracao(started_at, finished_at):
-    try:
-        segundos = int((datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)).total_seconds())
-    except (TypeError, ValueError):
-        return "tempo desconhecido"
-    segundos = max(0, segundos)
-    horas, resto = divmod(segundos, 3600)
-    minutos, seg = divmod(resto, 60)
-    if horas:
-        return f"{horas}h{minutos:02d}min"
-    if minutos:
-        return f"{minutos}min{seg:02d}s"
-    return f"{seg}s"
-
-
-def montar_resumo(job):
-    """Resumo curto do WhatsApp (28/09: o grupo pediu menos mensagem).
-
-    Vai como legenda da primeira planilha; o detalhe esta nas planilhas.
-    """
-    progress = job.get("progress") or {}
-    modo = job.get("mode")
-    rotulo_sucesso, rotulo_pendente = {
-        "consulta": ("encontrados", "não encontrados"),
-        "verificar": ("com cadastro", "sem cadastro"),
-    }.get(modo, ("cadastrados", "não cadastrados"))
-
-    total = progress.get("total", 0) or 0
-    processados = progress.get("processados", 0) or 0
-    sucessos = progress.get("sucessos", 0) or 0
-    pendentes = progress.get("pendentes", 0) or 0
-    erros = progress.get("erros", 0) or 0
-    nome = job.get("filename", "")
-
-    status = job.get("status")
-    if status == "completed":
-        titulo = f"✅ *{nome}* pronta"
-    elif status == "stopped":
-        titulo = f"⏸️ *{nome}* parada em {processados}/{total}"
-    else:
-        titulo = f"❌ *{nome}* deu erro em {processados}/{total}"
-    numeros = f"{sucessos} {rotulo_sucesso} · {pendentes} {rotulo_pendente}"
-    if erros:
-        numeros += f" · {erros} com erro de consulta"
-    return f"{titulo}\n{numeros}"
-
-
-def ordenar_anexos(job, arquivos):
-    """Encontrados primeiro, depois nao encontrados, erros por ultimo.
-
-    A planilha de erros so vai se tiver erro (sem erro ela vai so com cabecalho).
-    """
-    erros = ((job.get("progress") or {}).get("erros", 0) or 0)
-
-    def peso(caminho):
-        nome = Path(caminho).name.lower()
-        if "erro" in nome:
-            return 2
-        if "sem_" in nome or "nao_" in nome or "não_" in nome:
-            return 1
-        return 0
-
-    anexos = [a for a in arquivos if Path(a).exists() and Path(a).stat().st_size > 0]
-    if not erros:
-        anexos = [a for a in anexos if peso(a) != 2]
-    return sorted(anexos, key=peso)
+from resumo import _formatar_duracao, montar_resumo, ordenar_anexos  # noqa: E402,F401
 
 
 def notificar_whatsapp(job_id, result_dir):
@@ -559,6 +502,9 @@ def _iniciar_job(excel_bytes, display_name, mode, sigavi_login, sigavi_senha, he
     """
     secure_name = secure_filename(display_name) or "planilha.xlsx"
     job_id = uuid.uuid4().hex
+    if NUVEM:
+        return _iniciar_job_nuvem(job_id, secure_name, excel_bytes, display_name, mode, sigavi_login, sigavi_senha,
+                                  headless, destinos, extra_logs, empreendimento)
     job_dir = UPLOAD_ROOT / job_id
     job_dir.mkdir(parents=True, exist_ok=False)
     backup_dir = BACKUP_ROOT / backup_slug(secure_name)
@@ -613,6 +559,54 @@ def _iniciar_job(excel_bytes, display_name, mode, sigavi_login, sigavi_senha, he
     )
     thread.start()
     return job_id
+
+
+def _iniciar_job_nuvem(job_id, secure_name, excel_bytes, display_name, mode, sigavi_login, sigavi_senha,
+                      headless, destinos, extra_logs, empreendimento):
+    """Versao Cloud Run do _iniciar_job: grava entrada/meta/estado no bucket e dispara o Job."""
+    slug = backup_slug(secure_name)
+    nuvem.grava_bytes(nuvem.caminho_backup(slug, f"entrada_{secure_name}"), excel_bytes, XLSX_MIMETYPE)
+    nuvem.grava_json(nuvem.caminho_job(job_id, "meta.json"), {
+        "job_id": job_id, "slug": slug, "secure_name": secure_name, "mode": mode, "filename": display_name,
+        "destinos": list(destinos or []), "empreendimento": empreendimento, "headless": headless,
+    })
+    nuvem.grava_json(nuvem.caminho_job(job_id, "credenciais.json"), {"login": sigavi_login, "senha": sigavi_senha})
+    logs = list(extra_logs or []) + [
+        f"Modo selecionado: {ROTULO_MODO.get(mode, mode)}\n",
+        f"Planilha recebida: {display_name}\n",
+        f"Backup criado em: gs://{nuvem.BUCKET}/{nuvem.caminho_backup(slug)}\n",
+    ]
+    estado = {
+        "id": job_id, "status": "queued", "mode": mode, "filename": display_name,
+        "created_at": nuvem.agora_iso(), "batimento": nuvem.agora_iso(), "started_at": None, "finished_at": None,
+        "return_code": None, "pid": None, "backup_slug": slug, "destinos": list(destinos or []),
+        "empreendimento": empreendimento, "download_available": False, "result_files": [],
+        "result_deleted_at": None, "progress": None, "logs": logs,
+    }
+    nuvem.grava_json(nuvem.caminho_job(job_id, "estado.json"), estado)
+    nuvem.marca_ativo(job_id)
+    try:
+        execucao = nuvem.dispara_execucao(job_id)
+        app.logger.info("Job %s disparado: %s", job_id, execucao)
+    except Exception as exc:
+        nuvem.apaga(nuvem.caminho_job(job_id, "credenciais.json"))
+        estado.update(status="failed", finished_at=nuvem.agora_iso())
+        estado["logs"].append(f"\nErro ao executar automacao: {exc}\n")
+        nuvem.grava_json(nuvem.caminho_job(job_id, "estado.json"), estado)
+    with JOBS_LOCK:
+        JOBS[job_id] = estado
+    return job_id
+
+
+def _estado_job(job_id):
+    """O job como a tela precisa: da memoria (VM) ou do bucket (Cloud Run)."""
+    if NUVEM:
+        if not re.fullmatch(r"[0-9a-f]{32}", job_id or ""):
+            return None
+        return nuvem.le_json(nuvem.caminho_job(job_id, "estado.json"))
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        return dict(job, logs=list(job["logs"])) if job else None
 
 
 @app.get("/")
@@ -710,19 +704,16 @@ def create_job():
 @app.get("/jobs/<job_id>")
 @login_required
 def get_job(job_id):
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if not job:
-            return jsonify({"error": "Execucao nao encontrada."}), 404
-        payload = dict(job)
-        payload["logs"] = list(job["logs"])
-        result_files = [
-            {"id": item["id"], "filename": item["filename"]}
-            for item in job.get("result_files", [])
-            if not item.get("downloaded")
-        ]
-        payload["result_files"] = result_files
-        payload["download_available"] = bool(result_files)
+    payload = _estado_job(job_id)
+    if not payload:
+        return jsonify({"error": "Execucao nao encontrada."}), 404
+    result_files = [
+        {"id": item["id"], "filename": item["filename"]}
+        for item in payload.get("result_files", [])
+        if not item.get("downloaded")
+    ]
+    payload["result_files"] = result_files
+    payload["download_available"] = bool(result_files)
     return jsonify(payload)
 
 
@@ -731,6 +722,16 @@ def get_job(job_id):
 def stop_job(job_id):
     if not check_csrf():
         return jsonify({"error": "Sessao expirada. Atualize a pagina."}), 400
+
+    if NUVEM:
+        estado = _estado_job(job_id)
+        if not estado:
+            return jsonify({"error": "Execucao nao encontrada."}), 404
+        if estado["status"] not in RUNNING_STATUSES:
+            return jsonify({"error": "Execucao nao esta rodando."}), 409
+        # o Job confere esse aviso a cada ~10s e para no proximo ponto seguro
+        nuvem.grava_bytes(nuvem.caminho_job(job_id, "parar"), b"parar", "text/plain")
+        return jsonify({"ok": True})
 
     with JOBS_LOCK:
         job = JOBS.get(job_id)
@@ -748,6 +749,14 @@ def stop_job(job_id):
 
 
 def _serve_result_file(job_id, file_id=None):
+    if NUVEM:
+        estado = _estado_job(job_id) or {}
+        arquivos = estado.get("result_files", [])
+        item = arquivos[0] if (file_id is None and arquivos) else next((a for a in arquivos if a["id"] == file_id), None)
+        if not item:
+            return jsonify({"error": "Resultado nao disponivel."}), 404
+        headers = {"Content-Disposition": f'attachment; filename="{secure_filename(item["filename"])}"'}
+        return Response(nuvem.le_bytes(item["gcs"]), mimetype=XLSX_MIMETYPE, headers=headers)
     selected_file = None
     remaining_files = []
     with JOBS_LOCK:
@@ -807,9 +816,7 @@ def reprocess_errors(job_id):
     if has_active_job():
         return jsonify({"error": "Ja existe uma automacao em andamento."}), 409
 
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        snapshot = dict(job) if job else None
+    snapshot = _estado_job(job_id)
     if not snapshot:
         return jsonify({"error": "Execucao original nao encontrada."}), 404
     if snapshot["status"] in RUNNING_STATUSES:
@@ -825,7 +832,17 @@ def reprocess_errors(job_id):
     status_erro = "erro_consulta" if mode in MODOS_LEITURA else "erro_cadastro"
     chave_resultados = "resultados_email" if mode in MODOS_LEITURA else "resultados_cadastro"
 
-    backup_dir = Path(snapshot.get("backup_dir", ""))
+    if NUVEM:
+        # traz o progresso e a entrada do backup no bucket pra uma pasta temporaria
+        import tempfile
+        backup_dir = Path(tempfile.mkdtemp(prefix="reproc_"))
+        slug = snapshot.get("backup_slug", "")
+        for nome in nuvem.lista(nuvem.caminho_backup(slug) + "/"):
+            base = nome.rsplit("/", 1)[-1]
+            if base == "progresso.json" or (base.startswith("entrada_") and base.endswith(".xlsx")):
+                nuvem.baixa_arquivo(nome, backup_dir / base)
+    else:
+        backup_dir = Path(snapshot.get("backup_dir", ""))
     progresso_path = backup_dir / "progresso.json"
     if not progresso_path.exists():
         return jsonify({"error": "Nao ha dados de progresso para reprocessar."}), 400

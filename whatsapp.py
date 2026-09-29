@@ -63,7 +63,13 @@ def credenciais_ok():
 
 
 def _headers():
-    return {"apikey": _key(), "Content-Type": "application/json"}
+    h = {"apikey": _key(), "Content-Type": "application/json"}
+    # Do Cloud Run a Evolution só é alcançada pelo túnel do ngrok, que exige esta chave
+    # (30/09). Na VM (localhost) a variável não existe e nada muda.
+    tunel = os.getenv("EVOLUTION_TUNEL_CHAVE", "").strip()
+    if tunel:
+        h["X-Tunel-Chave"] = tunel
+    return h
 
 
 def enviar_texto(texto, numero):
